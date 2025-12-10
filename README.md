@@ -34,7 +34,8 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
     ```
 4.  **Access the Dashboard**:
     *   Open `http://localhost:8000` in your browser.
-    *   Go to **Providers** and sync your Telnyx Application.a
+    *   **API Documentation**: The FastAPI docs page can be found at `/docs` (e.g., `http://localhost:8000/docs`).
+    *   Go to **Providers** and sync your Telnyx Application.
 
 ## Configuration (.env)
 
