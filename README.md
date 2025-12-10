@@ -1,6 +1,8 @@
 # LLM Communications Gateway
 
-A powerful, self-hosted gateway for building Voice AI applications with LLMs. Connects Telnyx telephony to your local or remote LLMs (Ollama, Open WebUI, OpenAI) with low-latency Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).
+Primarily intended for use with Open WebUI (See the companion tool here: https://openwebui.com/t/rezz/communications_gateway_tool)
+
+A powerful, self-hosted gateway for building Voice AI applications with LLMs. Connects Telnyx telephony to your local or remote LLMs (Open WebUI, Ollama, OpenAI) with low-latency Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).
 
 ## Please do not open this to the internet! Better security is planned but not yet implemented
 
