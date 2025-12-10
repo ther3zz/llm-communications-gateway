@@ -1,15 +1,16 @@
 # LLM Communications Gateway
 
-Primarily intended for use with Open WebUI (See the companion tool here: https://openwebui.com/t/rezz/communications_gateway_tool)
+> [!CAUTION]
+> **SECURITY WARNING**: Please do **not** open this application to the public internet! Better security is planned but not yet implemented. Run this only on a trusted private network behind a secure tunnel (like ngrok) or VPN.
 
 A powerful, self-hosted gateway for building Voice AI applications with LLMs. Connects Telnyx telephony to your local or remote LLMs (Open WebUI, Ollama, OpenAI) with low-latency Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).
 
-## Please do not open this to the internet! Better security is planned but not yet implemented
+**Primarily intended for use with Open WebUI** (See the companion tool here: [Communications Gateway Tool](https://openwebui.com/t/rezz/communications_gateway_tool))
 
 ## Features
 
 - **Real-time Voice AI**: Bi-directional voice conversations with interruption handling.
-- **Provider Agnostic**: Support for OpenAI, Ollama, Open WebUI, and custom LLM endpoints.
+- **Provider Agnostic**: Support for Open WebUI, Ollama, OpenAI and custom LLM endpoints.
 - **Web Dashboard**: Manage providers, view call logs, and configure prompts via a modern UI.
 - **Dockerized**: Easy deployment with Docker Compose.
 - **Configurable**: extensive environment variable support for easy "infrastructure-as-code" setup.
@@ -17,7 +18,7 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 ## Prerequisites
 
 - Docker Desktop / Docker Compose
-- A Telnyx Account (API Key and Phone Number)
+- A Telnyx Account (API Key and Phone Number) - **Note:** Telnyx is the only provider currently tested and confirmed working for Voice/SMS.
 - An LLM Provider (Ollama running locally, Open WebUI, or OpenAI Key)
 
 ## Fast Start
