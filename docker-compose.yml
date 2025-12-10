@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  llm-communications-gateway:
+    build: .
+    container_name: llm-communications-gateway
+    ports:
+      - "8005:8000"
+    volumes:
+      - ./backend/data:/app/backend/data
+      # Uncomment to develop backend with restart
+      # - ./backend:/app/backend
+    environment:
+      - DATABASE_URL=sqlite:///backend/data/database.db
+      # - DATABASE_URL=postgresql://user:password@postgres:5432/llm_gateway
+    env_file:
+      - .env
+    restart: unless-stopped
