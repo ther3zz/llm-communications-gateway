@@ -1,1 +1,273 @@
+from fastapi import APIRouter, Depends, HTTPException
+from sqlmodel import Session, select
+from typing import List, Optional
+from pydantic import BaseModel
 
+from ..database import get_session
+from ..models import ProviderConfig, MessageLog, VoiceConfig, CallLog
+from ..providers.telnyx import TelnyxProvider
+from ..providers.others import MockProvider, TwilioProvider, VonageProvider
+from ..utils.security import encrypt_value, decrypt_value
+
+router = APIRouter()
+
+@router.get("/proxies/llm/models")
+def get_llm_models(session: Session = Depends(get_session)):
+    import requests
+    config = session.exec(select(VoiceConfig)).first()
+    
+    # Use defaults if not configured
+    llm_url = (config.llm_url if config else None) or "http://open-webui:8080/v1"
+    
+    try:
+        # OpenAI compatible: /models
+        url = f"{llm_url.rstrip('/')}/models"
+        headers = {}
+        if config.llm_api_key:
+            headers["Authorization"] = f"Bearer {decrypt_value(config.llm_api_key)}"
+            
+        resp = requests.get(url, headers=headers, timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"Error fetching models: {e}")
+        return {"data": []}
+
+@router.get("/proxies/parakeet/status")
+def get_parakeet_status(session: Session = Depends(get_session)):
+    import requests
+    config = session.exec(select(VoiceConfig)).first()
+    if not config or not config.stt_url:
+        raise HTTPException(status_code=400, detail="STT URL not configured")
+    
+    try:
+        url = f"{config.stt_url.rstrip('/')}/healthz"
+        resp = requests.get(url, timeout=3)
+        resp.raise_for_status()
+        return {"status": "ok", "detail": "Connected to Parakeet"}
+    except Exception as e:
+        # Return 200 with error detail to prevent frontend try/catch block from masking details
+        # Or better, return 503 so frontend sees it as error. Let's return 503 for clarity.
+        raise HTTPException(status_code=503, detail=f"Failed to connect to Parakeet: {e}")
+
+class SMSSendRequest(BaseModel):
+    to_number: str
+    message: str
+    provider: Optional[str] = None # Optional override
+
+class ProviderConfigCreate(BaseModel):
+    name: str
+    api_key: str
+    api_url: Optional[str] = None
+    from_number: Optional[str] = None
+    app_id: Optional[str] = None
+    app_id: Optional[str] = None
+    enabled: bool = True
+    priority: int = 0
+    webhook_secret: Optional[str] = None
+
+def get_provider_instance(name: str, config: ProviderConfig):
+    if name == 'telnyx':
+        return TelnyxProvider(api_key=decrypt_value(config.api_key))
+    elif name == 'mock':
+        return MockProvider(api_key="mock", api_url="mock")
+    # Add others
+    return MockProvider(api_key="mock", api_url="mock")
+
+@router.post("/sms/send")
+def send_sms(request: SMSSendRequest, session: Session = Depends(get_session)):
+    # 1. Determine provider
+    if request.provider:
+        provider_config = session.exec(select(ProviderConfig).where(ProviderConfig.name == request.provider)).first()
+    else:
+        # Get highest priority enabled provider
+        provider_config = session.exec(select(ProviderConfig).where(ProviderConfig.enabled == True).order_by(ProviderConfig.priority)).first()
+    
+    if not provider_config:
+        raise HTTPException(status_code=400, detail="No active provider found")
+
+    # 2. Instantiate provider
+    provider = get_provider_instance(provider_config.name, provider_config)
+    
+    # 3. Send
+    # Use config from_number if not specified? For now assume config has it.
+    from_num = provider_config.from_number or "+10000000000"
+    
+    result = provider.send_sms(request.to_number, from_num, request.message)
+    
+    # 4. Log
+    log = MessageLog(
+        provider_used=provider_config.name,
+        destination=request.to_number,
+        content=request.message,
+        status="sent" if result['success'] else "failed",
+        error_message=result['error'],
+        cost=result['cost'],
+        message_id=result['message_id']
+    )
+    session.add(log)
+    session.commit()
+    session.refresh(log)
+    
+    return result
+
+@router.get("/config/providers", response_model=List[ProviderConfig])
+def get_providers(session: Session = Depends(get_session)):
+    return session.exec(select(ProviderConfig)).all()
+
+@router.post("/config/providers", response_model=ProviderConfig)
+def create_provider(provider: ProviderConfigCreate, session: Session = Depends(get_session)):
+    p_data = provider.dict()
+    if p_data.get('api_key'):
+        p_data['api_key'] = encrypt_value(p_data['api_key'])
+    p_data = provider.dict()
+    if p_data.get('api_key'):
+        p_data['api_key'] = encrypt_value(p_data['api_key'])
+    
+    # Auto-generate webhook secret if not provided
+    if not p_data.get('webhook_secret'):
+        import uuid
+        p_data['webhook_secret'] = uuid.uuid4().hex
+        
+    db_provider = ProviderConfig(**p_data)
+    session.add(db_provider)
+    session.commit()
+    session.refresh(db_provider)
+    return db_provider
+
+@router.put("/config/providers/{provider_id}", response_model=ProviderConfig)
+def update_provider(provider_id: int, provider: ProviderConfigCreate, session: Session = Depends(get_session)):
+    db_provider = session.get(ProviderConfig, provider_id)
+    if not db_provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    provider_data = provider.dict(exclude_unset=True)
+    for key, value in provider_data.items():
+        if key == 'api_key' and value:
+            value = encrypt_value(value)
+        setattr(db_provider, key, value)
+    session.add(db_provider)
+    session.commit()
+    session.refresh(db_provider)
+    return db_provider
+
+@router.delete("/config/providers/{provider_id}")
+def delete_provider(provider_id: int, session: Session = Depends(get_session)):
+    provider = session.get(ProviderConfig, provider_id)
+    if not provider:
+        raise HTTPException(status_code=404, detail="Provider not found")
+    session.delete(provider)
+    session.commit()
+    return {"ok": True}
+
+@router.get("/stats")
+def get_stats(limit: int = 100, session: Session = Depends(get_session)):
+    # SMS Stats
+    sms_logs = session.exec(select(MessageLog).order_by(MessageLog.timestamp.desc()).limit(limit)).all()
+    total_sms = session.query(MessageLog).count()
+    
+    # Voice Stats
+    # We might need to import CallLog if not already imported at top, but let's assume I'll fix imports next or rely on previous context
+    # actually I need to make sure CallLog is imported.
+    from ..models import CallLog
+    voice_logs = session.exec(select(CallLog).order_by(CallLog.timestamp.desc()).limit(limit)).all()
+    total_calls = session.query(CallLog).count()
+    
+    return {
+        "sms": {"logs": sms_logs, "total": total_sms},
+        "voice": {"logs": voice_logs, "total": total_calls}
+    }
+
+@router.get("/logs")
+def get_logs(skip: int = 0, limit: int = 20, session: Session = Depends(get_session)):
+    logs = session.exec(select(MessageLog).order_by(MessageLog.timestamp.desc()).offset(skip).limit(limit)).all()
+    total = session.query(MessageLog).count()
+    return {"logs": logs, "total": total, "skip": skip, "limit": limit}
+
+@router.get("/logs/calls")
+def get_call_logs(skip: int = 0, limit: int = 20, session: Session = Depends(get_session)):
+    logs = session.exec(select(CallLog).order_by(CallLog.timestamp.desc()).offset(skip).limit(limit)).all()
+    total = session.query(CallLog).count()
+    return {"logs": logs, "total": total, "skip": skip, "limit": limit}
+
+@router.get("/config/voice", response_model=VoiceConfig)
+def get_voice_config(session: Session = Depends(get_session)):
+    config = session.exec(select(VoiceConfig)).first()
+    if not config:
+        # Return default
+        return VoiceConfig()
+    
+    # Decrypt for UI display
+    if config.llm_api_key:
+        config.llm_api_key = decrypt_value(config.llm_api_key)
+    return config
+
+
+@router.post("/config/voice", response_model=VoiceConfig)
+def save_voice_config(config: VoiceConfig, session: Session = Depends(get_session)):
+    existing = session.exec(select(VoiceConfig)).first()
+    if existing:
+        existing.stt_url = config.stt_url
+        existing.tts_url = config.tts_url
+        existing.llm_url = config.llm_url
+        existing.llm_provider = config.llm_provider
+        if config.llm_api_key:
+             existing.llm_api_key = encrypt_value(config.llm_api_key)
+        existing.llm_model = config.llm_model
+        existing.voice_id = config.voice_id
+        existing.stt_timeout = config.stt_timeout
+        existing.tts_timeout = config.tts_timeout
+        existing.llm_timeout = config.llm_timeout
+        existing.system_prompt = config.system_prompt
+        existing.send_conversation_context = config.send_conversation_context
+        session.add(existing)
+        session.commit()
+        session.refresh(existing)
+        return existing
+    else:
+        if config.llm_api_key:
+            config.llm_api_key = encrypt_value(config.llm_api_key)
+        session.add(config)
+        session.commit()
+        session.refresh(config)
+        return config
+
+@router.get("/proxies/chatterbox/voices")
+def get_chatterbox_voices(session: Session = Depends(get_session)):
+    config = session.exec(select(VoiceConfig)).first()
+    
+    # Use defaults
+    tts_url = (config.tts_url if config else None) or "http://chatterbox:8000"
+    
+    import requests
+    try:
+        # User example: /v1/voices
+        url = f"{tts_url.rstrip('/')}/v1/voices"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"Error fetching voices: {e}")
+        # Return empty or error structure so frontend doesn't crash
+        return {"voices": []}
+
+
+
+
+@router.post("/admin/migrate")
+def migrate_db():
+    from ..database import create_db_and_tables
+    try:
+        create_db_and_tables()
+        return {"status": "success", "message": "Database tables created/migrated."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/config/defaults")
+def get_config_defaults():
+    # Return Env Var defaults for UI pre-filling
+    return {
+        "ollama_url": os.getenv("OLLAMA_URL", "http://localhost:11434"),
+        "openwebui_url": os.getenv("OPEN_WEBUI_URL", "http://open-webui:8080/v1"),
+        "base_url": os.getenv("BASE_URL", ""),
+        "system_prompt": os.getenv("SYSTEM_PROMPT", "")
+    }
