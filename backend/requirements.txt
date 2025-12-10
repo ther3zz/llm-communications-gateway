@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+websockets
+sqlmodel
+requests
+python-multipart
+audioop-lts 
+# We are using pure python alternatives now, but keeping env clean.
+telnyx
+cryptography
