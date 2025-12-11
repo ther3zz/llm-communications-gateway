@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Phone, MessageSquare, ArrowLeft, ArrowRight } from 'lucide-react';
+import { Phone, MessageSquare, ArrowLeft, ArrowRight, User } from 'lucide-react';
 
 interface Log {
     id: number;
@@ -11,6 +11,8 @@ interface Log {
     timestamp: string;
     content: string;
     error_message?: string;
+    user_id?: string;
+    chat_id?: string;
 }
 
 interface CallLog {
@@ -22,6 +24,8 @@ interface CallLog {
     timestamp: string;
     duration_seconds: number;
     transcription?: string;
+    user_id?: string;
+    chat_id?: string;
 }
 
 export default function MessageLogs() {
@@ -96,6 +100,7 @@ export default function MessageLogs() {
                                     <th>Provider</th>
                                     <th>Destination</th>
                                     <th>Message</th>
+                                    <th>User / Chat</th>
                                     <th>Status</th>
                                     <th>Error</th>
                                     <th className="text-right">Cost</th>
@@ -109,6 +114,26 @@ export default function MessageLogs() {
                                         <td>{log.destination}</td>
                                         <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.content}>
                                             {log.content}
+                                        </td>
+                                        <td>
+                                            {(log.user_id || log.chat_id) ? (
+                                                <div className="flex flex-col gap-1">
+                                                    {log.user_id && (
+                                                        <div className="flex items-center gap-1 text-xs text-slate-300 bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50 w-fit" title={`User ID: ${log.user_id}`}>
+                                                            <User size={10} className="text-indigo-400" />
+                                                            <span className="font-mono opacity-80">{log.user_id.slice(0, 6)}...</span>
+                                                        </div>
+                                                    )}
+                                                    {log.chat_id && (
+                                                        <div className="flex items-center gap-1 text-xs text-slate-300 bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50 w-fit" title={`Chat ID: ${log.chat_id}`}>
+                                                            <MessageSquare size={10} className="text-emerald-400" />
+                                                            <span className="font-mono opacity-80">{log.chat_id.slice(0, 6)}...</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <span className="text-slate-700">-</span>
+                                            )}
                                         </td>
                                         <td>
                                             <span className={`badge ${log.status === 'sent' ? 'badge-sent' : log.status === 'failed' ? 'badge-failed' : 'badge-default'}`}>
@@ -131,6 +156,7 @@ export default function MessageLogs() {
                                     <th>Time</th>
                                     <th>Result</th>
                                     <th>Contact</th>
+                                    <th>User / Chat</th>
                                     <th>Duration</th>
                                     <th>Transcription</th>
                                     <th className="text-right">Cost</th>
@@ -148,6 +174,26 @@ export default function MessageLogs() {
                                         <td>
                                             <div className="text-sm">{log.to_number}</div>
                                             <div className="text-xs text-slate-500">from {log.from_number}</div>
+                                        </td>
+                                        <td>
+                                            {(log.user_id || log.chat_id) ? (
+                                                <div className="flex flex-col gap-1">
+                                                    {log.user_id && (
+                                                        <div className="flex items-center gap-1 text-xs text-slate-300 bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50 w-fit" title={`User ID: ${log.user_id}`}>
+                                                            <User size={10} className="text-indigo-400" />
+                                                            <span className="font-mono opacity-80">{log.user_id.slice(0, 6)}...</span>
+                                                        </div>
+                                                    )}
+                                                    {log.chat_id && (
+                                                        <div className="flex items-center gap-1 text-xs text-slate-300 bg-slate-800/50 px-1.5 py-0.5 rounded border border-slate-700/50 w-fit" title={`Chat ID: ${log.chat_id}`}>
+                                                            <MessageSquare size={10} className="text-emerald-400" />
+                                                            <span className="font-mono opacity-80">{log.chat_id.slice(0, 6)}...</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <span className="text-slate-700">-</span>
+                                            )}
                                         </td>
                                         <td>{log.duration_seconds}s</td>
                                         <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.transcription}>

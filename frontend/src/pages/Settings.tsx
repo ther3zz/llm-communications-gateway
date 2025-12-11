@@ -39,6 +39,7 @@ interface VoiceConfig {
     llm_timeout?: number;
     system_prompt?: string;
     send_conversation_context?: boolean;
+    rtp_codec?: string;
 }
 
 interface EnvDefaults {
@@ -60,7 +61,8 @@ export default function Settings() {
         stt_timeout: 10,
         tts_timeout: 10,
         llm_timeout: 10,
-        send_conversation_context: true
+        send_conversation_context: true,
+        rtp_codec: 'PCMU'
     });
 
     // Voices state
@@ -720,6 +722,22 @@ export default function Settings() {
                                 <RefreshCw size={18} />
                             </button>
                         </div>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="form-label">RTP Codec</label>
+                        <select
+                            className="form-select"
+                            value={voiceConfig.rtp_codec || 'PCMU'}
+                            onChange={e => setVoiceConfig({ ...voiceConfig, rtp_codec: e.target.value })}
+                        >
+                            <option value="PCMU">PCMU (u-law) - Default</option>
+                            <option value="PCMA">PCMA (a-law)</option>
+                            <option value="L16">L16 (8kHz Linear PCM) - High Quality</option>
+                        </select>
+                        <p className="text-xs text-slate-400 mt-1">
+                            Audio encoding. PCMU/PCMA are compressed (8-bit). L16 is uncompressed (16-bit), providing clearer audio.
+                        </p>
                     </div>
 
                     <div className="form-group">
