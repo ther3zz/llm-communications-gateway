@@ -7,7 +7,7 @@ class SMSProvider(ABC):
         self.api_url = api_url
 
     @abstractmethod
-    def send_sms(self, to_number: str, from_number: str, message: str) -> Dict:
+    def send_sms(self, to_number: str, from_number: str, message: str, media_urls: list[str] = None, media_base64: list[str] = None) -> Dict:
         """
         Sends an SMS.
         Returns a dict with: {'success': bool, 'message_id': str, 'error': str, 'cost': float}

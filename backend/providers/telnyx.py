@@ -1,5 +1,9 @@
 import telnyx
 from typing import Dict
+import requests
+import json
+import base64
+import os
 from .base import SMSProvider
 
 class TelnyxProvider(SMSProvider):
@@ -7,13 +11,158 @@ class TelnyxProvider(SMSProvider):
         super().__init__(api_key)
         self.client = telnyx.Client(api_key=self.api_key)
 
-    def send_sms(self, to_number: str, from_number: str, message: str) -> Dict:
+    def upload_media(self, url: str) -> str:
+        """
+        Downloads media from a URL and uploads it to Telnyx Media Storage.
+        Returns the public URL provided by Telnyx.
+        """
         try:
-            resp = self.client.messages.send(
-                from_=from_number,
-                to=to_number,
-                text=message
-            )
+            print(f"[DEBUG] Downloading media from: {url}")
+            # 1. Download Content
+            r_get = requests.get(url, stream=True)
+            r_get.raise_for_status()
+            
+            filename = url.split('/')[-1].split('?')[0] or "media_file"
+            
+            # 2. Upload to Telnyx
+            # Endpoint: POST https://api.telnyx.com/v2/media
+            print(f"[DEBUG] Uploading {filename} to Telnyx Storage...")
+            files = {
+                'media_url': (None, url), # Telnyx supports direct URL fetch too!
+            }
+            # Wait, docs say "media_url" OR "file". 
+            # If we use media_url, Telnyx fetches it. This is SAFER/FASTER if the URL is public.
+            # But the user said "users dont have to expose anything else". 
+            # If the user's URL is INTERNAL/LOCAL, Telnyx can't fetch it.
+            # So we MUST download and upload.
+            
+            files = {'media': (filename, r_get.content, r_get.headers.get('content-type'))}
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            
+            r_post = requests.post("https://api.telnyx.com/v2/media", files=files, headers=headers)
+            print(f"[DEBUG] Upload Response: {r_post.status_code} {r_post.text}")
+            
+            if r_post.status_code >= 400:
+                print(f"[WARN] Failed to upload media: {r_post.text}")
+                return url # Fallback to original URL?
+                
+            data = r_post.json().get('data', {})
+            return data.get('media_url') # The hosted URL
+            
+        except Exception as e:
+            print(f"[ERROR] Media Upload Failed: {e}")
+            return url # Fallback
+
+    def upload_base64(self, data_uri: str) -> str:
+        """
+        Decodes a Data URI and uploads it to Telnyx Media Storage.
+        Format: data:image/jpeg;base64,.....
+        """
+        try:
+            print(f"[DEBUG] Processing Base64 Data URI...")
+            
+            # 1. Parse Data URI
+            if ',' not in data_uri:
+                raise ValueError("Invalid Data URI format")
+                
+            header, encoded = data_uri.split(',', 1)
+            # data:image/jpeg;base64
+            mime_type = header.split(':')[1].split(';')[0]
+            extension = mime_type.split('/')[-1]
+            filename = f"upload_{base64.urlsafe_b64encode(os.urandom(6)).decode()}.{extension}"
+            
+            file_content = base64.b64decode(encoded)
+            
+            # 2. Upload to Telnyx
+            print(f"[DEBUG] Uploading {filename} ({len(file_content)} bytes) to Telnyx Storage...")
+            files = {'media': (filename, file_content, mime_type)}
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            
+            r_post = requests.post("https://api.telnyx.com/v2/media", files=files, headers=headers)
+            
+            if r_post.status_code >= 400:
+                print(f"[WARN] Failed to upload base64 media: {r_post.text}")
+                return None
+                
+            data = r_post.json().get('data', {})
+            return data.get('media_url')
+            
+        except Exception as e:
+            print(f"[ERROR] Base64 Upload Failed: {e}")
+            return None
+        super().__init__(api_key)
+        self.client = telnyx.Client(api_key=self.api_key)
+
+    def upload_media(self, url: str) -> str:
+        """
+        Downloads media from a URL and uploads it to Telnyx Media Storage.
+        Returns the public URL provided by Telnyx.
+        """
+        try:
+            print(f"[DEBUG] Downloading media from: {url}")
+            # 1. Download Content
+            r_get = requests.get(url, stream=True)
+            r_get.raise_for_status()
+            
+            filename = url.split('/')[-1].split('?')[0] or "media_file"
+            
+            # 2. Upload to Telnyx
+            # Endpoint: POST https://api.telnyx.com/v2/media
+            print(f"[DEBUG] Uploading {filename} to Telnyx Storage...")
+            files = {
+                'media_url': (None, url), # Telnyx supports direct URL fetch too!
+            }
+            # Wait, docs say "media_url" OR "file". 
+            # If we use media_url, Telnyx fetches it. This is SAFER/FASTER if the URL is public.
+            # But the user said "users dont have to expose anything else". 
+            # If the user's URL is INTERNAL/LOCAL, Telnyx can't fetch it.
+            # So we MUST download and upload.
+            
+            files = {'media': (filename, r_get.content, r_get.headers.get('content-type'))}
+            headers = {"Authorization": f"Bearer {self.api_key}"}
+            
+            r_post = requests.post("https://api.telnyx.com/v2/media", files=files, headers=headers)
+            print(f"[DEBUG] Upload Response: {r_post.status_code} {r_post.text}")
+            
+            if r_post.status_code >= 400:
+                print(f"[WARN] Failed to upload media: {r_post.text}")
+                return url # Fallback to original URL?
+                
+            data = r_post.json().get('data', {})
+            return data.get('media_url') # The hosted URL
+            
+        except Exception as e:
+            print(f"[ERROR] Media Upload Failed: {e}")
+            return url # Fallback
+
+    def send_sms(self, to_number: str, from_number: str, message: str, media_urls: list[str] = None, media_base64: list[str] = None) -> Dict:
+        try:
+            processed_media_urls = []
+            
+            # Process URLs
+            if media_urls:
+                print(f"[DEBUG] Processing {len(media_urls)} media URL attachments...")
+                for url in media_urls:
+                    hosted_url = self.upload_media(url)
+                    processed_media_urls.append(hosted_url)
+            
+            # Process Base64
+            if media_base64:
+                print(f"[DEBUG] Processing {len(media_base64)} media Base64 attachments...")
+                for data_uri in media_base64:
+                    hosted_url = self.upload_base64(data_uri)
+                    if hosted_url:
+                        processed_media_urls.append(hosted_url)
+
+            params = {
+                "from_": from_number,
+                "to": to_number,
+                "text": message
+            }
+            if processed_media_urls:
+                params["media_urls"] = processed_media_urls
+
+            resp = self.client.messages.send(**params)
             print(f"[DEBUG] SMS Response Type: {type(resp)}")
             print(f"[DEBUG] SMS Response Dir: {dir(resp)}")
             print(f"[DEBUG] SMS Response: {resp}")
@@ -34,7 +183,7 @@ class TelnyxProvider(SMSProvider):
         except:
             return 0.0
 
-    def make_call(self, to_number: str, from_number: str, connection_id: str, stream_url: str = None, stream_track: str = "both_tracks") -> dict:
+    def make_call(self, to_number: str, from_number: str, connection_id: str, stream_url: str = None, stream_track: str = "both_tracks", codec: str = "PCMU") -> dict:
         try:
             import requests
             import json
@@ -51,6 +200,9 @@ class TelnyxProvider(SMSProvider):
                 payload["stream_url"] = stream_url
                 payload["stream_track"] = stream_track
                 payload["stream_bidirectional_mode"] = "rtp"
+                # Signal the codec to Telnyx!
+                # Note: Telnyx uses "L16" but might want "L16" strictly. Codec config is usually PCMU/PCMA/L16.
+                payload["stream_bidirectional_codec"] = codec
 
             print(f"[DEBUG] Direct API Dial Payload: {json.dumps(payload, indent=2)}")
 
