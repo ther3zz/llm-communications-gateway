@@ -29,9 +29,10 @@ class CallRequest(BaseModel):
     to_number: str
     provider: str # Required now
     from_number: Optional[str] = None
-    from_number: Optional[str] = None
     prompt: Optional[str] = None # Initial system prompt for the agent logic
     delay_ms: Optional[int] = 0 # Delay in BEFORE sending audio (to avoid overlap with "This is an automated call")
+    user_id: Optional[str] = None
+    chat_id: Optional[str] = None
     
 class WebhookQuery(BaseModel):
     token: str
@@ -49,77 +50,92 @@ class CreateAppRequest(BaseModel):
 # --- Audio Utilities ---
 PRELOADED_MESSAGES = {} # call_id -> list of base64 payloads
 STREAM_ID_MAP = {} # short_id -> call_id
+CALL_CONTEXT = {} # call_id -> {user_id, chat_id}
 DEBUG_AUDIO_DIR = "backend/debug_audio"
 if not os.path.exists(DEBUG_AUDIO_DIR):
     os.makedirs(DEBUG_AUDIO_DIR, exist_ok=True)
 
 
 
-def process_tts_stream(tts_stream, voice_id: str):
+def process_tts_stream(audio_stream, voice_id: str, codec: str = "PCMU"):
     """
-    Consumes a TTS stream, handles arbitrary chunking, detects WAV header,
-    resamples to 8000Hz, encdodes to PCMU.
+    Consumes an ASYNC audio stream (PCM/WAV), resamples/transcodes it, and YIELDS encoded chunks as JSON strings.
+    WARNING: Because this yields, it must be iterated with 'async for' by the caller if audio_stream is async.
+    Actually, creating an 'async generator' requires 'async def'.
     """
-    state = None
-    in_rate = 24000 # Default fallback
-    header_parsed = False
+    return _process_tts_stream_async(audio_stream, voice_id, codec)
+
+async def _process_tts_stream_async(audio_stream, voice_id, codec):
+    """
+    Async implementation of audio processing
+    """
+    print(f"Processing TTS Stream for Voice: {voice_id} (Target Codec: {codec})")
     
-    # Buffer for accumulating raw bytes
+    # State for resampling/transcoding
+    state = None
     audio_buffer = bytearray()
     
-    for chunk in tts_stream:
-        if not header_parsed and b'RIFF' in chunk[:100]:
-            # Simple header detection in first few chunks
-            try:
-                # Find start of RIFF
-                idx = chunk.find(b'RIFF')
-                if idx != -1 and len(chunk) >= idx + 28:
-                    in_rate = struct.unpack('<I', chunk[idx+24:idx+28])[0]
-                    print(f"Detected TTS Sample Rate: {in_rate}Hz")
-                    # assume standard 44 byte header
-                    chunk = chunk[idx+44:] 
-                    header_parsed = True
-            except Exception as e:
-                print(f"Header parsing warning: {e}")
-                
+    # WAV Header Parsing State
+    header_parsed = False
+    header_buffer = bytearray()
+    HEADER_SIZE = 44
+    
+    in_rate = 24000 # Default fallback
+    
+    async for chunk in audio_stream:
+        if not header_parsed:
+            header_buffer.extend(chunk)
+            if len(header_buffer) >= HEADER_SIZE:
+                # Parse RIFF Header to find Sample Rate
+                try:
+                    # .. Check RIFF ...
+                     rate_packed = header_buffer[24:28]
+                     in_rate = struct.unpack('<I', rate_packed)[0]
+                     print(f"Detected TTS Sample Rate: {in_rate}Hz")
+                     header_parsed = True
+                     
+                     # Process remaining bytes in this chunk as audio
+                     remaining = header_buffer[HEADER_SIZE:]
+                     audio_buffer.extend(remaining)
+                except Exception as e:
+                    print(f"Error parsing WAV header: {e}. Defaulting to 24000.")
+                    header_parsed = True # Skip parsing to avoid stuck loop
+                    audio_buffer.extend(header_buffer)
+            continue
+            
         audio_buffer.extend(chunk)
         
-        # Process in smaller blocks for low latency (e.g. 960 bytes inputs ~ 20ms at 24kHz)
         # This prevents 'not a whole number of frames' errors in audioop
         BLOCK_SIZE = 960
         
         while len(audio_buffer) >= BLOCK_SIZE:
-            # Extract block
+             # Extract block
             raw_block = bytes(audio_buffer[:BLOCK_SIZE])
             del audio_buffer[:BLOCK_SIZE]
             
+            # Target Rate: 8000 for L16 (Telnyx PSTN usually forces 8k even for L16), 8000 for PCMU/PCMA
+            target_rate = 8000
+            
             # Resample if needed
             processed_block = raw_block
-            if in_rate != 8000:
+            if in_rate != target_rate:
                 try:
-                    # ratecv(fragment, width, nchannels, inrate, outrate, state)
-                    processed_block, state = audioop.ratecv(raw_block, 2, 1, in_rate, 8000, state)
+                    processed_block, state = audioop.ratecv(raw_block, 2, 1, in_rate, target_rate, state)
                 except Exception as e:
                     print(f"Resampling error (block): {e}")
-                    # If resampling fails, we drop this block to avoid noise
                     continue
 
-            # Encode to u-law
+            # Encode
             try:
-               ulaw_data = audioop.lin2ulaw(processed_block, 2)
-               
-               # DEBUG: Save first few chunks of TTS
-               try:
-                   # Append mode to capture stream
-                   if len(os.listdir(DEBUG_AUDIO_DIR)) < 10 or os.path.getsize(f"{DEBUG_AUDIO_DIR}/tts_stream_sample.ulaw") < 100000:
-                        with open(f"{DEBUG_AUDIO_DIR}/tts_stream_sample.ulaw", "ab") as f:
-                            f.write(ulaw_data)
-               except: pass
+               if codec == "L16":
+                   encoded_data = processed_block
+               elif codec == "PCMA":
+                   encoded_data = audioop.lin2alaw(processed_block, 2)
+               else:
+                   encoded_data = audioop.lin2ulaw(processed_block, 2)
 
-               b64_payload = base64.b64encode(ulaw_data).decode('utf-8')
-               # print(f"[STREAM] Processing chunk. Raw: {len(processed_block)} -> Encoded: {len(b64_payload)}")
+               b64_payload = base64.b64encode(encoded_data).decode('utf-8')
                yield json.dumps({
-                   "event": "media", 
                    "event": "media", 
                    "media": {
                        "payload": b64_payload
@@ -129,31 +145,26 @@ def process_tts_stream(tts_stream, voice_id: str):
                 print(f"Encoding error: {e}")
 
     # Process remaining remainder (if even)
-    if len(audio_buffer) > 0:
-        if len(audio_buffer) % 2 != 0:
-            audio_buffer = audio_buffer[:-1] # Trim odd byte
-            
-        if len(audio_buffer) > 0:
-             raw_block = bytes(audio_buffer)
-             processed_block = raw_block
-             if in_rate != 8000:
-                 try:
-                    processed_block, state = audioop.ratecv(raw_block, 2, 1, in_rate, 8000, state)
-                 except: pass
+    if len(audio_buffer) > 0 and len(audio_buffer) % 2 == 0:
+         target_rate = 8000
+         try:
+             processed_block = bytes(audio_buffer)
+             if in_rate != target_rate:
+                  processed_block, state = audioop.ratecv(bytes(audio_buffer), 2, 1, in_rate, target_rate, state)
              
-             try:
-                 ulaw_data = audioop.lin2ulaw(processed_block, 2)
-                 b64 = base64.b64encode(ulaw_data).decode('utf-8')
-                 yield json.dumps({
-                     "event": "media", 
-                     "event": "media", 
-                     "media": {
-                         "payload": b64
-                     }
-                 })
-             except: pass
+             if codec == "L16":
+                encoded_data = processed_block
+             elif codec == "PCMA":
+                encoded_data = audioop.lin2alaw(processed_block, 2)
+             else:
+                encoded_data = audioop.lin2ulaw(processed_block, 2)
+                
+             b64_payload = base64.b64encode(encoded_data).decode('utf-8')
+             yield json.dumps({"event": "media", "media": {"payload": b64_payload}})
+         except Exception as e:
+             print(f"Remainder error: {e}")
 
-def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
+async def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
     """
     Synchronously generate audio chunks for the prompt.
     Returns a list of JSON strings (media messages).
@@ -205,8 +216,9 @@ def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
             try:
                 tts_client = ChatterboxClient(base_url=tts_url)
                 tts_stream = tts_client.speak_stream(reply, voice_id=voice_id, timeout=tts_timeout)
+                codec = voice_config_data.get("rtp_codec", "PCMU")
                 
-                for msg_json in process_tts_stream(tts_stream, voice_id):
+                async for msg_json in process_tts_stream(tts_stream, voice_id, codec=codec):
                     audio_buffer.append(msg_json)
                     
                 print(f"Audio generation complete. Buffered {len(audio_buffer)} chunks.")
@@ -302,6 +314,9 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
         if voice_config and voice_config.tts_url: tts_url = voice_config.tts_url
         
         send_context = voice_config.send_conversation_context if voice_config else True
+        rtp_codec = (voice_config.rtp_codec if voice_config else None) or "PCMU"
+        
+        print(f"[DEBUG] Loaded Timeouts from DB -> LLM: {llm_timeout}, TTS: {tts_timeout}, STT: {stt_timeout}")
         
         
     except Exception as e:
@@ -336,7 +351,7 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
         try:
             # 2a. Send Silence Burst
             print(f"[DEBUG] [Sender] Sending silence to establish audio path...")
-            for silence_chunk in generate_silence(duration_sec=0.5):
+            for silence_chunk in generate_silence(duration_sec=0.5, codec=rtp_codec):
                 await websocket.send_text(json.dumps({
                     "event": "media",
                     "stream_id": stream_id,
@@ -351,7 +366,7 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                  print(f"[DEBUG] [Sender] Applying audio delay of {delay_ms}ms with continuous silence...")
                  num_silence_chunks = int(delay_ms / 20)
                  for _ in range(num_silence_chunks):
-                     for silence_chunk in generate_silence(duration_sec=0.02):
+                     for silence_chunk in generate_silence(duration_sec=0.02, codec=rtp_codec):
                          await websocket.send_text(json.dumps({
                              "event": "media",
                              "stream_id": stream_id,
@@ -402,6 +417,13 @@ You are a helpful AI assistant.
     else:
         base_prompt = db_system_prompt if db_system_prompt and db_system_prompt.strip() else DEFAULT_SYSTEM_PROMPT
     
+    # Inject Context
+    context = CALL_CONTEXT.get(call_id, {})
+    user_id = context.get("user_id")
+    chat_id = context.get("chat_id")
+    if user_id or chat_id:
+        base_prompt += f"\n\n[Context: user_id={user_id}, chat_id={chat_id}]"
+    
     TOOL_INSTRUCTIONS = """
 You can control the call by outputting a JSON block at the very end of your response.
 Available Tools:
@@ -427,7 +449,7 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
          print(f"[DEBUG] [Turn] Speaking Gate ENABLED (User: {transcript})")
          
          try:
-             full_transcription.append(transcript)
+             full_transcription.append(f"User: {transcript}")
              
              # Update History
              conversation_history.append({"role": "user", "content": transcript})
@@ -507,10 +529,27 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
 
                      # 3. Speak Cleaned Text
                      total_sent_bytes = 0
+                     speech_start_time = None
                      if final_text_to_speak.strip():
                           print(f"[DEBUG] [Turn] TTS Input (Cleaned): '{final_text_to_speak}'")
+                          
+                          # A. Send small silence padding to prevent cutoff (warmup)
+                          # Reduced to 100ms to minimize latency perception
+                          print(f"[DEBUG] [Turn] Sending pre-TTS silence padding...")
+                          for padding_chunk in generate_silence(duration_sec=0.1, codec=rtp_codec):
+                               await websocket.send_text(json.dumps({
+                                   "event": "media",
+                                   "stream_id": stream_id,
+                                   "media": {
+                                       "payload": padding_chunk
+                                   }
+                               }))
+                               await asyncio.sleep(0.01)
+
                           tts_stream_gen = tts_client.speak_stream(final_text_to_speak, voice_id=voice_id, timeout=tts_timeout)
-                          for msg_json in process_tts_stream(tts_stream_gen, voice_id):
+                          async for msg_json in process_tts_stream(tts_stream_gen, voice_id, codec=rtp_codec):
+                              if speech_start_time is None:
+                                  speech_start_time = asyncio.get_event_loop().time()
                               msg = json.loads(msg_json)
                               if stream_id: msg["stream_id"] = stream_id
                               
@@ -539,20 +578,36 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                      if final_text_to_speak.strip():
                         # Store only the CLEAN spoken text in history.
                         conversation_history.append({"role": "assistant", "content": final_text_to_speak})
+                        # Add to full transcription for Call Log
+                        full_transcription.append(f"Assistant: {final_text_to_speak}")
                      
                      if should_hangup:
-                         # Calculate dynamic sleep time based on ACTUAL audio sent
-                         # PCMU 8kHz = 8000 bytes/sec
+                         # Calculate dynamic sleep time based on WALL CLOCK
+                         # L16 (16-bit, 8kHz) = 16000 bytes/sec
+                         # PCMU (8-bit, 8kHz) = 8000 bytes/sec
+                         bytes_per_sec = 16000 if rtp_codec == "L16" else 8000
+                         
+                         wait_time = 0.1 # Default small buffer (was 0.5)
+                         
                          if total_sent_bytes > 0:
-                             speech_duration = total_sent_bytes / 8000.0
-                             # Add small buffer for network/buffer draining (0.5s is usually enough for reliable packet arrival)
-                             wait_time = speech_duration + 0.5 
-                             print(f"[DEBUG] [Turn] Exact Audio Duration: {speech_duration:.2f}s. Hanging up in {wait_time:.2f}s...")
-                         else:
-                             # Fallback if no audio (shouldn't happen if text existed)
-                             wait_time = 2.0
-                             print(f"[DEBUG] [Turn] No audio bytes tracked. Fallback wait: {wait_time}s")
+                             speech_duration = total_sent_bytes / float(bytes_per_sec)
                              
+                             if speech_start_time:
+                                 # Time elapsed since we STARTED speaking
+                                 elapsed = asyncio.get_event_loop().time() - speech_start_time
+                                 # We want to wait until start + duration
+                                 # Remaining wait = duration - elapsed
+                                 remaining = speech_duration - elapsed
+                                 
+                                 if remaining > 0:
+                                     wait_time = remaining + 0.1 # Small buffer
+                                     print(f"[DEBUG] [Turn] Duration: {speech_duration:.2f}s. Elapsed: {elapsed:.2f}s. Waiting remaining: {wait_time:.2f}s")
+                                 else:
+                                     wait_time = 0.1 # Just buffer
+                                     print(f"[DEBUG] [Turn] Duration: {speech_duration:.2f}s. Already elapsed: {elapsed:.2f}s. Just buffer.")
+                             else:
+                                  wait_time = speech_duration + 0.1
+                         
                          await asyncio.sleep(wait_time)
                      else:
                          # Normal turn: Just wait a bit for echo tail / buffer drain
@@ -624,8 +679,20 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
 
                 payload = msg.get("media", {}).get("payload") 
                 if payload:
-                    chunk_pcmu = base64.b64decode(payload)
-                    chunk_pcm16 = audioop.ulaw2lin(chunk_pcmu, 2)
+                    chunk_in = base64.b64decode(payload)
+                    
+                    if rtp_codec == "L16":
+                        # L16 is 16k BE (usually), but Telnyx PSTN seems to force 8k.
+                        # And we already found LE is preferred.
+                        # So we assume 8k LE input. No Swap. No Resample.
+                        chunk_pcm16 = chunk_in
+                    elif rtp_codec == "PCMA":
+                        chunk_pcm16 = audioop.ulaw2lin(chunk_in, 2) # Wait, this is alaw2lin!
+                        chunk_pcm16 = audioop.alaw2lin(chunk_in, 2)
+                    else:
+                        # PCMU
+                        chunk_pcm16 = audioop.ulaw2lin(chunk_in, 2)
+                        
                     inbound_buffer.extend(chunk_pcm16)
                     
                     # VAD Logic
@@ -714,6 +781,12 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
             except Exception as e:
                 print(f"[ERROR] Sender task error: {e}")
 
+        # Cancel any ongoing turn tasks (LLM generation/TTS)
+        if turn_tasks:
+            print(f"[DEBUG] Cancelling {len(turn_tasks)} background turn tasks...")
+            for t in turn_tasks:
+                t.cancel()
+
         try:
             await websocket.close()
         except:
@@ -731,7 +804,7 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                 if call_log:
                     call_log.status = "completed"
                     call_log.duration_seconds = duration
-                    call_log.transcription = " ".join(full_transcription)
+                    call_log.transcription = "\n".join(full_transcription)
                     # Cost calculation placeholder (e.g. $0.005/min)
                     call_log.cost = (duration / 60) * 0.005 
                     db_session.add(call_log)
@@ -744,7 +817,8 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                 print(f"[ERROR] Failed to update CallLog: {e}")
 
 @router.post("/voice/call")
-def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
+@router.post("/voice/call")
+async def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     provider_config = session.exec(select(ProviderConfig).where(ProviderConfig.name == request.provider, ProviderConfig.enabled == True)).first()
     print(f"[DEBUG] Initiate Call Request: {request.json()}")
     if not provider_config:
@@ -752,8 +826,14 @@ def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: 
     
     connection_id = provider_config.app_id
     if not connection_id:
-        raise HTTPException(status_code=400, detail="Provider missing App ID / Connection ID for voice") 
-    
+        raise HTTPException(status_code=400, detail=f"Provider '{request.provider}' missing App ID (Connection ID)")
+
+    # Use configured from_number from DB, ignore request payload if present
+    from_number = provider_config.from_number
+    if not from_number:
+         raise HTTPException(status_code=400, detail=f"Provider '{request.provider}' missing configured 'From Number'")
+
+    print(f"[DEBUG] Initiating call via {request.provider} (ID: {connection_id}) from {from_number} to {request.to_number}")
     # Resolve Base URL for Stream
     base_url = provider_config.base_url
     scheme = "http"
@@ -801,9 +881,10 @@ def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: 
            "llm_timeout": getattr(voice_config, "llm_timeout", 10),
            "tts_timeout": getattr(voice_config, "tts_timeout", 10),
            "tts_url": (voice_config.tts_url if voice_config else None) or "http://chatterbox:8000",
-           "system_prompt": getattr(voice_config, "system_prompt", None)
+           "system_prompt": getattr(voice_config, "system_prompt", None),
+           "rtp_codec": getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
          }
-         audio_buffer = generate_initial_audio(request.prompt, vc_data)
+         audio_buffer = await generate_initial_audio(request.prompt, vc_data)
     else:
         audio_buffer = []
 
@@ -811,12 +892,16 @@ def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: 
     from_num = request.from_number or provider_config.from_number or "+15555555555"
 
     # Pass stream_url to make_call
-    result = provider.make_call(request.to_number, from_num, connection_id, stream_url=stream_url)
+    rtp_codec = getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
+    result = provider.make_call(request.to_number, from_num, connection_id, stream_url=stream_url, codec=rtp_codec)
     
     call_log = CallLog(
         to_number=request.to_number,
         from_number=from_num,
         status="initiated" if result['success'] else "failed",
+        user_id=request.user_id,
+        chat_id=request.chat_id,
+        call_control_id=result.get('call_id')
     )
     session.add(call_log)
     session.commit()
@@ -834,6 +919,13 @@ def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: 
                  "prompt": request.prompt
              }
              print(f"Mapped {short_id} -> {result.get('call_id')} (DB: {call_log.id})")
+             
+             # Store Context
+             if request.user_id or request.chat_id:
+                 CALL_CONTEXT[result.get('call_id')] = {
+                     "user_id": request.user_id,
+                     "chat_id": request.chat_id
+                 }
 
 
         if audio_buffer:
@@ -958,12 +1050,24 @@ def create_provider_app(request: CreateAppRequest, session: Session = Depends(ge
         "message": "App created. Please save the provider to persist the App ID and Webhook Secret."
     }
 
-def generate_silence(duration_sec=1.0, sample_rate=8000):
-   """Generate silent u-law audio chunks (0xFF)"""
-   CHUNK_SIZE = 160 # 20ms
-   total_bytes = int(duration_sec * sample_rate)
-   # u-law silence is 0xFF
-   silence = bytes([0xFF] * CHUNK_SIZE)
+def generate_silence(duration_sec=1.0, codec="PCMU"):
+   """Generate silent audio chunks."""
+   if codec == "L16":
+       sample_rate = 8000 # 16000 << Telnyx PSTN L16 is 8kHz
+       bytes_per_sample = 2
+       silence_byte = 0x00
+   else: # PCMU / PCMA
+       sample_rate = 8000
+       bytes_per_sample = 1
+       silence_byte = 0xFF if codec == "PCMU" else 0xD5 # PCMA silence is typically 0xD5 or 0x55, but 0xFF is often acceptable quiet. PCMU is 0xFF.
+
+   # 20ms chunk size
+   # PCMU: 8000 * 0.02 * 1 = 160 bytes
+   # L16: 16000 * 0.02 * 2 = 640 bytes
+   CHUNK_SIZE = int(sample_rate * 0.02 * bytes_per_sample)
+   
+   total_bytes = int(duration_sec * sample_rate * bytes_per_sample)
+   silence = bytes([silence_byte] * CHUNK_SIZE)
    
    num_chunks = total_bytes // CHUNK_SIZE
    for _ in range(num_chunks):

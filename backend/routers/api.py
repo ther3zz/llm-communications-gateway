@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from typing import List, Optional
 from pydantic import BaseModel
+import json
 
 from ..database import get_session
 from ..models import ProviderConfig, MessageLog, VoiceConfig, CallLog
@@ -54,6 +55,10 @@ class SMSSendRequest(BaseModel):
     to_number: str
     message: str
     provider: Optional[str] = None # Optional override
+    media_urls: Optional[List[str]] = None
+    media_base64: Optional[List[str]] = None # List of Data URIs
+    user_id: Optional[str] = None
+    chat_id: Optional[str] = None
 
 class ProviderConfigCreate(BaseModel):
     name: str
@@ -91,11 +96,33 @@ def send_sms(request: SMSSendRequest, session: Session = Depends(get_session)):
     
     # 3. Send
     # Use config from_number if not specified? For now assume config has it.
-    from_num = provider_config.from_number or "+10000000000"
-    
-    result = provider.send_sms(request.to_number, from_num, request.message)
+    from_num = provider_config.from_number    # Send via provider
+    try:
+        result = provider.send_sms(
+            to_number=request.to_number,
+            from_number=from_num,
+            message=request.message,
+            media_urls=request.media_urls,
+            media_base64=request.media_base64
+        )
+    except Exception as e:
+        # Handle potential errors during SMS sending
+        result = {
+            'success': False,
+            'error': str(e),
+            'cost': 0.0,
+            'message_id': None
+        }
     
     # 4. Log
+    media_content = None
+    if request.media_urls:
+         media_content = json.dumps([str(u) for u in request.media_urls])
+    # If base64 was used, the provider might have returned a URL (feature specific to Telnyx logic elsewhere),
+    # but base64 itself isn't a URL so we don't save the HUGE string here.
+    # FUTURE: If provider returns the uploaded URL (like Telnyx does internally), we might want to capture it.
+    # Currently send_sms result doesn't return the media URL.
+    
     log = MessageLog(
         provider_used=provider_config.name,
         destination=request.to_number,
@@ -103,13 +130,87 @@ def send_sms(request: SMSSendRequest, session: Session = Depends(get_session)):
         status="sent" if result['success'] else "failed",
         error_message=result['error'],
         cost=result['cost'],
-        message_id=result['message_id']
+        message_id=result['message_id'],
+        user_id=request.user_id,
+        chat_id=request.chat_id,
+        media_url=media_content
     )
     session.add(log)
     session.commit()
     session.refresh(log)
     
     return result
+
+@router.get("/messages/{message_id}")
+def get_message_status(message_id: str, user_id: str, session: Session = Depends(get_session)):
+    """
+    Retrieve message status by ID.
+    Requires user_id to match the record for security.
+    """
+    # 1. Look up log by message_id (which is the provider's ID usually stored in message_id column)
+    # The message_id in DB is the provider's ID.
+    log = session.exec(select(MessageLog).where(MessageLog.message_id == message_id)).first()
+    
+    if not log:
+        # Fallback: Check if message_id is actually our internal DB ID (if pure integer passed)?
+        # But instructions verify "message_id" which usually implies the UUID returned by send.
+        
+        # Second try: Maybe user passed internal ID?
+        if message_id.isdigit():
+             log = session.get(MessageLog, int(message_id))
+
+    if not log:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    # 2. Security Check
+    # "must also pass the user id that sent the message and it must match"
+    if log.user_id != user_id:
+        # Return 404 to avoid leaking existence? Or 403.
+        # "must match before returning any info" -> 404 is safer to prevent enumeration.
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {
+        "id": log.id,
+        "message_id": log.message_id,
+        "status": log.status,
+        "cost": log.cost,
+        "media_url": log.media_url,
+        "error": log.error_message,
+        "timestamp": log.timestamp
+    }
+
+
+@router.get("/calls/{call_id}")
+def get_call_status(call_id: str, user_id: str, session: Session = Depends(get_session)):
+    """
+    Retrieve call status by call_control_id (or internal ID).
+    Requires user_id match.
+    """
+    # 1. Lookup by Call Control ID
+    log = session.exec(select(CallLog).where(CallLog.call_control_id == call_id)).first()
+    
+    if not log:
+        # 2. Fallback: Internal ID
+        if call_id.isdigit():
+            log = session.get(CallLog, int(call_id))
+            
+    if not log:
+        raise HTTPException(status_code=404, detail="Call not found")
+        
+    # 3. Security Check
+    if log.user_id != user_id:
+        raise HTTPException(status_code=404, detail="Call not found")
+        
+    return {
+        "id": log.id,
+        "call_id": log.call_control_id,
+        "status": log.status,
+        "duration": log.duration_seconds,
+        "cost": log.cost,
+        "recording_url": log.recording_url,
+        "transcription": log.transcription,
+        "timestamp": log.timestamp
+    }
 
 @router.get("/config/providers", response_model=List[ProviderConfig])
 def get_providers(session: Session = Depends(get_session)):
