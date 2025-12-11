@@ -45,8 +45,20 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 | `OLLAMA_URL` | URL for Ollama (e.g. `http://host.docker.internal:11434`) | - |
 | `OPEN_WEBUI_URL` | URL for Open WebUI | - |
 | `BASE_URL` | Public URL for Telnyx Webhooks | - |
+| `RTP_CODEC` | Audio Codec: `L16` (High Quality), `PCMU`, `PCMA` | `PCMU` |
+| `LLM_TIMEOUT` | Timeout for LLM generation (seconds) | `10` |
+| `STT_TIMEOUT` | Timeout for STT transcriptions (seconds) | `10` |
+| `TTS_TIMEOUT` | Timeout for TTS generation (seconds) | `10` |
 | `TELNYX_API_KEY` | Your Telnyx API Key (seeds DB on start) | - |
 | `DEBUG` | Set to `true` for verbose logging | `false` |
+
+## Codec Support
+- **L16 (Recommended)**: Uncompressed 16-bit 8kHz Linear PCM. Provides significantly clearer audio quality than standard PCMU/A.
+- **PCMU/PCMA**: Standard G.711 codecs for legacy compatibility.
+
+## Performance
+- **Async TTS**: Includes a fully asynchronous, non-blocking TTS streaming engine (via `httpx`) for ultra-low latency response times.
+- **Smart Hangup**: Uses wall-clock timing to calculate exact speech duration, ensuring the call ends immediately after the AI finishes speaking.
 
 ## Troubleshooting
 
