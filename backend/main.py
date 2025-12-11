@@ -57,7 +57,20 @@ async def lifespan(app: FastAPI):
              except Exception as e:
                  print(f"Migration failed (base_url): {e}")
                  
-        # 3. VoiceConfig Timeouts
+        # 3. VoiceConfig Timeouts - (Existing logic skipped for brevity if not modified)
+
+        # 4. Context Logging (user_id, chat_id)
+        for table in ["messagelog", "calllog"]:
+             try:
+                 session.exec(text(f"SELECT user_id FROM {table} LIMIT 1"))
+             except Exception:
+                 print(f"Migrating: Adding context columns to {table}")
+                 try:
+                     session.exec(text(f"ALTER TABLE {table} ADD COLUMN user_id VARCHAR"))
+                     session.exec(text(f"ALTER TABLE {table} ADD COLUMN chat_id VARCHAR"))
+                     session.commit()
+                 except Exception as e:
+                     print(f"Migration failed ({table} context): {e}")
         try:
             session.exec(text("SELECT stt_timeout FROM voiceconfig LIMIT 1"))
         except Exception:
@@ -91,6 +104,54 @@ async def lifespan(app: FastAPI):
                  session.commit()
              except Exception as e:
                  print(f"Migration failed (llm_provider): {e}")
+
+        # 6. Send Conversation Context
+        try:
+             session.exec(text("SELECT send_conversation_context FROM voiceconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding send_conversation_context to voiceconfig")
+             try:
+                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN send_conversation_context BOOLEAN DEFAULT 1"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (send_conversation_context): {e}")
+
+             except Exception as e:
+                 print(f"Migration failed (send_conversation_context): {e}")
+
+        # 7. Call Control ID
+        try:
+             session.exec(text("SELECT call_control_id FROM calllog LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding call_control_id to calllog")
+             try:
+                 session.exec(text("ALTER TABLE calllog ADD COLUMN call_control_id VARCHAR"))
+                 session.commit()
+             except Exception as e:
+                 # This might fail if table doesn't exist yet (created by SQLModel on fresh run), which is fine.
+                 print(f"Migration failed (call_control_id): {e}")
+
+        # 8. MMS Media URL (MessageLog)
+        try:
+             session.exec(text("SELECT media_url FROM messagelog LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding media_url to messagelog")
+             try:
+                 session.exec(text("ALTER TABLE messagelog ADD COLUMN media_url VARCHAR"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (media_url): {e}")
+
+        # 9. RTP Codec (VoiceConfig)
+        try:
+             session.exec(text("SELECT rtp_codec FROM voiceconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding rtp_codec to voiceconfig")
+             try:
+                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN rtp_codec VARCHAR DEFAULT 'PCMU'"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (rtp_codec): {e}")
 
     # --- Seeding ---
     
@@ -278,6 +339,7 @@ async def lifespan(app: FastAPI):
              try:
                  val = int(env_llm_timeout)
                  if v_config.llm_timeout != val:
+                     print(f"[DEBUG] Updating LLM Timeout from Env: {val}")
                      v_config.llm_timeout = val
                      updated = True
              except: pass
@@ -287,6 +349,7 @@ async def lifespan(app: FastAPI):
              try:
                  val = int(env_stt_timeout)
                  if v_config.stt_timeout != val:
+                     print(f"[DEBUG] Updating STT Timeout from Env: {val}")
                      v_config.stt_timeout = val
                      updated = True
              except: pass
@@ -296,6 +359,7 @@ async def lifespan(app: FastAPI):
              try:
                  val = int(env_tts_timeout)
                  if v_config.tts_timeout != val:
+                     print(f"[DEBUG] Updating TTS Timeout from Env: {val}")
                      v_config.tts_timeout = val
                      updated = True
              except: pass
@@ -314,6 +378,12 @@ async def lifespan(app: FastAPI):
                  print(f"[DEBUG] Updating Send Context from Env: {val}")
                  v_config.send_conversation_context = val
                  updated = True
+
+        env_rtp_codec = os.getenv("RTP_CODEC")
+        if env_rtp_codec and v_config.rtp_codec != env_rtp_codec:
+             print(f"[DEBUG] Updating RTP Codec from Env: {env_rtp_codec}")
+             v_config.rtp_codec = env_rtp_codec
+             updated = True
 
         if updated:
             session.add(v_config)

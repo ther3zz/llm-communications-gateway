@@ -29,6 +29,7 @@ class VoiceConfig(SQLModel, table=True):
     llm_timeout: int = Field(default=10, description="Timeout in seconds for LLM requests")
     system_prompt: Optional[str] = Field(default=None, description="Custom System Prompt for the Voice Bot")
     send_conversation_context: bool = Field(default=True, description="Whether to send full conversation history to LLM")
+    rtp_codec: str = Field(default="PCMU", description="RTP Codec for audio streaming (PCMU, PCMA)")
 
 
 class MessageLog(SQLModel, table=True):
@@ -41,6 +42,9 @@ class MessageLog(SQLModel, table=True):
     error_message: Optional[str] = None
     cost: Optional[float] = Field(default=0.0)
     message_id: Optional[str] = None # External ID from provider
+    user_id: Optional[str] = None
+    chat_id: Optional[str] = None
+    media_url: Optional[str] = None # JSON list or single URL
 
 class CallLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -52,3 +56,6 @@ class CallLog(SQLModel, table=True):
     cost: Optional[float] = Field(default=0.0)
     recording_url: Optional[str] = None
     transcription: Optional[str] = None
+    user_id: Optional[str] = None
+    chat_id: Optional[str] = None
+    call_control_id: Optional[str] = None
