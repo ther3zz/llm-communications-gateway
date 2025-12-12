@@ -46,6 +46,7 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 | `OPEN_WEBUI_URL` | URL for Open WebUI | - |
 | `BASE_URL` | Public URL for Telnyx Webhooks | - |
 | `RTP_CODEC` | Audio Codec: `L16` (High Quality), `PCMU`, `PCMA` | `PCMU` |
+| `DEFAULT_MAX_DURATION` | Global default max call duration (seconds) | `600` |
 | `LLM_TIMEOUT` | Timeout for LLM generation (seconds) | `10` |
 | `STT_TIMEOUT` | Timeout for STT transcriptions (seconds) | `10` |
 | `TTS_TIMEOUT` | Timeout for TTS generation (seconds) | `10` |
@@ -55,6 +56,22 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 ## Codec Support
 - **L16 (Recommended)**: Uncompressed 16-bit 8kHz Linear PCM. Provides significantly clearer audio quality than standard PCMU/A.
 - **PCMU/PCMA**: Standard G.711 codecs for legacy compatibility.
+
+## New Features (v1.1)
+
+### 📞 Inbound Call Handling
+- **Full Support**: The gateway now fully supports inbound calls (Call-In).
+- **Inbound Prompt**: Configure a specific system prompt for inbound callers (e.g., "You receive a call from a customer...") via the Provider settings.
+- **Zero-Latency Greeting**: Uses `asyncio.Queue` streaming to begin speaking *immediately* when the call connects, even while the rest of the greeting is still generating.
+
+### ⏱️ Call Duration Limits
+- **Cost Control**: Set a hard limit (e.g., 5 minutes) on all calls to prevent runaway API costs.
+- **Custom Message**: Configure a polite "Time's up" message that plays before the call is automatically terminated.
+- **Configurable**: Set globally via `DEFAULT_MAX_DURATION` env var or per-provider in the Dashboard.
+
+### 📊 Enhanced Logging
+- **Direction**: Call logs now clearly distinguish between `inbound` and `outbound` calls.
+- **Status Tracking**: Improved status updates ensuring failed or incomplete calls are correctly marked in the DB.
 
 ## Performance
 - **Async TTS**: Includes a fully asynchronous, non-blocking TTS streaming engine (via `httpx`) for ultra-low latency response times.
