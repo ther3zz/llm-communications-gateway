@@ -15,7 +15,7 @@ async def lifespan(app: FastAPI):
     if debug_mode:
         print("[DEBUG] --- STARTING APP: VERSION v2.2 (LLM Provider Support) ---")
         print("[DEBUG] Starting lifespan...")
-        print(f"[DEBUG] Environment Keys: {[k for k in os.environ.keys() if any(x in k for x in ['TELNYX', 'POSTGRES', 'LLM', 'TTS', 'WEBHOOK', 'OLLAMA', 'OPEN_WEBUI', 'BASE', 'SYSTEM_PROMPT'])]}")
+        print(f"[DEBUG] Environment Keys: {[k for k in os.environ.keys() if any(x in k for x in ['TELNYX', 'POSTGRES', 'LLM', 'TTS', 'WEBHOOK', 'OLLAMA', 'OPEN_WEBUI', 'BASE', 'SYSTEM_PROMPT', 'INBOUND'])]}")
 
     create_db_and_tables()
     
@@ -56,6 +56,18 @@ async def lifespan(app: FastAPI):
                  session.commit()
              except Exception as e:
                  print(f"Migration failed (base_url): {e}")
+
+        # 2b. ProviderConfig (Inbound)
+        try:
+             session.exec(text("SELECT inbound_enabled FROM providerconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding inbound cols to providerconfig")
+             try:
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN inbound_system_prompt VARCHAR"))
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN inbound_enabled BOOLEAN DEFAULT 1"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (provider_inbound): {e}")
                  
         # 3. VoiceConfig Timeouts - (Existing logic skipped for brevity if not modified)
 
@@ -79,6 +91,8 @@ async def lifespan(app: FastAPI):
                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN stt_timeout INTEGER DEFAULT 10"))
                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN tts_timeout INTEGER DEFAULT 10"))
                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN llm_timeout INTEGER DEFAULT 10"))
+                session.exec(text("ALTER TABLE voiceconfig ADD COLUMN llm_timeout INTEGER DEFAULT 10"))
+                # session.exec(text("ALTER TABLE voiceconfig ADD COLUMN inbound_system_prompt VARCHAR")) # REMOVED in Refactor
                 session.commit()
             except Exception as e:
                 print(f"Migration failed (timeouts): {e}")
@@ -105,7 +119,30 @@ async def lifespan(app: FastAPI):
              except Exception as e:
                  print(f"Migration failed (llm_provider): {e}")
 
-        # 6. Send Conversation Context
+        # 6. Call Direction
+        try:
+             session.exec(text("SELECT direction FROM calllog LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding direction to calllog")
+             try:
+                 session.exec(text("ALTER TABLE calllog ADD COLUMN direction VARCHAR DEFAULT 'outbound'"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (direction): {e}")
+
+        # 7. Provider Call Duration Limits
+        try:
+             session.exec(text("SELECT max_call_duration FROM providerconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding duration limits to providerconfig")
+             try:
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN max_call_duration INTEGER DEFAULT 600"))
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN call_limit_message VARCHAR DEFAULT 'This call has reached its time limit. Goodbye.'"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (duration limits): {e}")
+
+        # 8. Send Conversation Context
         try:
              session.exec(text("SELECT send_conversation_context FROM voiceconfig LIMIT 1"))
         except Exception:
@@ -185,6 +222,13 @@ async def lifespan(app: FastAPI):
                      print(f"Updating Telnyx App ID from Env: {env_app_id}")
                      provider.app_id = env_app_id
                      updates = True
+
+                env_inbound_prompt = os.getenv("INBOUND_SYSTEM_PROMPT")
+                if env_inbound_prompt and provider.inbound_system_prompt != env_inbound_prompt:
+                     print(f"Updating Telnyx Inbound Prompt from Env")
+                     provider.inbound_system_prompt = env_inbound_prompt
+                     updates = True
+
                 if updates:
                     session.add(provider)
                     session.commit()

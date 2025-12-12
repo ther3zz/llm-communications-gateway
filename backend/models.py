@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlmodel import Field, SQLModel
+import os
 
 class ProviderConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -13,6 +14,10 @@ class ProviderConfig(SQLModel, table=True):
     priority: int = Field(default=0) # 0 = highest priority
     webhook_secret: Optional[str] = Field(default=None, description="Secret token for securing webhooks specific to this provider")
     base_url: Optional[str] = Field(default=None, description="Public Base URL for WebSocket connections")
+    inbound_system_prompt: Optional[str] = Field(default=None, description="System prompt for inbound calls using this provider")
+    inbound_enabled: bool = Field(default=True) # Whether to accept inbound calls
+    max_call_duration: int = Field(default_factory=lambda: int(os.getenv("DEFAULT_MAX_DURATION", 600))) # Max duration in seconds
+    call_limit_message: Optional[str] = Field(default="This call has reached its time limit. Goodbye.")
 
 class VoiceConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -59,3 +64,4 @@ class CallLog(SQLModel, table=True):
     user_id: Optional[str] = None
     chat_id: Optional[str] = None
     call_control_id: Optional[str] = None
+    direction: str = Field(default="outbound") # inbound, outbound
