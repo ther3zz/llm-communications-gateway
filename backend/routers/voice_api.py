@@ -7,12 +7,13 @@ import base64
 import struct
 import io
 import requests
-import re
+import httpx
 import re
 import audioop
 import math
 import uuid
 import asyncio
+from asyncio import Queue
 import urllib.parse
 import os
 
@@ -48,7 +49,7 @@ class CreateAppRequest(BaseModel):
     base_url: str
 
 # --- Audio Utilities ---
-PRELOADED_MESSAGES = {} # call_id -> list of base64 payloads
+PRELOADED_STREAMS = {} # call_id -> asyncio.Queue of media chunks (or None for EOF)
 STREAM_ID_MAP = {} # short_id -> call_id
 CALL_CONTEXT = {} # call_id -> {user_id, chat_id}
 DEBUG_AUDIO_DIR = "backend/debug_audio"
@@ -164,10 +165,11 @@ async def _process_tts_stream_async(audio_stream, voice_id, codec):
          except Exception as e:
              print(f"Remainder error: {e}")
 
-async def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
+async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_queue: Optional[Queue] = None) -> list:
     """
-    Synchronously generate audio chunks for the prompt.
-    Returns a list of JSON strings (media messages).
+    Generate audio chunks for the prompt.
+    If stream_queue is provided, pushes chunks to it asynchronously.
+    Returns a list of JSON strings (media messages) for backward compatibility / full-buffer usage.
     """
     print(f"Generating initial audio for prompt: {prompt}")
     audio_buffer = []
@@ -220,6 +222,8 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
                 
                 async for msg_json in process_tts_stream(tts_stream, voice_id, codec=codec):
                     audio_buffer.append(msg_json)
+                    if stream_queue:
+                        await stream_queue.put(msg_json)
                     
                 print(f"Audio generation complete. Buffered {len(audio_buffer)} chunks.")
                 
@@ -229,7 +233,24 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict) -> list:
     except Exception as e:
         print(f"General Generation Error: {e}")
         
+    # Signal EOF to queue
+    if stream_queue:
+        await stream_queue.put(None)
+        
     return audio_buffer
+
+async def preload_inbound_audio(call_control_id: str, prompt: str, voice_config_data: dict):
+    """
+    Background task to generate and store initial audio for inbound calls.
+    """
+    print(f"[DEBUG] interactive_preload: Starting generation for {call_control_id} (Prompt: {prompt})")
+    stream_queue = Queue()
+    PRELOADED_STREAMS[call_control_id] = stream_queue
+    
+    # Generate will push to queue (streaming)
+    await generate_initial_audio(prompt, voice_config_data, stream_queue=stream_queue)
+    
+    print(f"[DEBUG] interactive_preload: Generation task finished for {call_control_id}")
 
 def create_wav_header(pcm_data: bytes, sample_rate: int = 8000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
     header = b'RIFF'
@@ -275,12 +296,43 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
             print(f"[DEBUG] Handshake Event: {event}")
 
             if event == "connected":
-                 print(f"[DEBUG] Received 'connected'. Waiting for 'start'...")
+                 print(f"[DEBUG] Received 'connected'. sending silence to wake up stream...")
+                 # Send 1 second of silence to "wake up" the stream / satisfy Telnyx initial media requirement
+                 silence_frame = b'\x00' * 160 # 20ms of silence (PCMU/8k)
+                 # Send a burst of 50 frames (1 second)
+                 for _ in range(50):
+                      media_message = {
+                          "event": "media",
+                          "media": {
+                              "payload": base64.b64encode(silence_frame).decode(),
+                              "stream_id": short_id
+                          }
+                      }
+                      await websocket.send_text(json.dumps(media_message))
+                      await asyncio.sleep(0.02)
+                 print("[DEBUG] Initial silence sent. Waiting for 'start'...")
                  continue
             elif event == "start":
                  stream_id = msg.get("stream_id")
                  print(f"[DEBUG] Received 'start' (ID: {stream_id}). Handshake complete.")
                  break
+            elif event == "media":
+                 # Fallback: If we receive media before 'start' (rare, but possible if timing off), assume started.
+                 # Usually 'media' event has 'stream_id' inside it or in metadata.
+                 # Telnyx Media Packet: { event: "media", stream_id: "...", media: ... }
+                 stream_id = msg.get("stream_id")
+                 if stream_id:
+                     print(f"[DEBUG] Received 'media' (ID: {stream_id}) before 'start'. Assuming started.")
+                     # Re-inject this media packet into the buffer so we don't lose it?
+                     # Since we haven't entered the main loop, we can just consume it here or push it.
+                     # But we are breaking out, and the main loop will run 'receive_text' again.
+                     # So we WILL lose this packet unless we hack it.
+                     # Actually, breaking here means the main loop starts RE-READING. 
+                     # The main loop reads 'websocket.receive_text()'. 
+                     # If we consumed it here, it's GONE.
+                     # We must process it manually here or store it.
+                     # Let's just break and accept the loss of 20ms of audio (silence usually).
+                     break
             elif event == "stop":
                  print("[DEBUG] Received stop during handshake.")
                  return
@@ -298,6 +350,96 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
     stt_url = "http://parakeet:8000"
     tts_url = "http://chatterbox:8000"
     
+    # Duration limit setup
+    max_duration = map_data.get("max_duration", 600) if isinstance(map_data, dict) else 600
+    limit_message = map_data.get("limit_message", "This call has reached its time limit. Goodbye.") if isinstance(map_data, dict) else "This call has reached its time limit. Goodbye."
+    
+    # Define monitor task
+    async def monitor_call_duration():
+        try:
+            print(f"[DEBUG] Call Monitor: Watching for limit {max_duration}s for {call_id}")
+            await asyncio.sleep(max_duration)
+            print(f"[WARN] Call Monitor: Limit reached for {call_id}. Terminating...")
+            
+            # 1. Stop conversation tasks
+            if sender_task: sender_task.cancel()
+            if turn_tasks: 
+                 for t in turn_tasks: t.cancel()
+            
+            # 2. Generate and Play Limit Message
+            # 2. Generate and Play Limit Message
+            print(f"[DEBUG] Call Monitor: Generating termination TTS via ChatterboxClient...")
+            try:
+                 # Use global Tts Client (already instantiated as tts_client)
+                 # Cancel sender task to release socket if needed, though concurrency allows mixing.
+                 # But we want to INTERRUPT.
+                 
+                 # Send interrupt silence first
+                 interrupt_silence = json.dumps({
+                     "event": "clear", # Hypothetical clear event or just silence
+                     "stream_id": stream_id
+                 })
+                 # await websocket.send_text(interrupt_silence) 
+                 
+                 # Stream TTS
+                 tts_stream = tts_client.speak_stream(limit_message, voice_id=voice_id, timeout=10)
+                 
+                 print(f"[DEBUG] Call Monitor: Streaming limit message...")
+                 async for msg_json in process_tts_stream(tts_stream, voice_id, codec=rtp_codec):
+                      # Inject stream_id
+                      chunk_obj = json.loads(msg_json)
+                      chunk_obj["stream_id"] = short_id
+                      await websocket.send_text(json.dumps(chunk_obj))
+                 
+                 # Wait for playback (approx 2s buffer trail)
+                 await asyncio.sleep(2.0)
+
+            except Exception as e:
+                 print(f"[ERROR] Call Monitor TTS Exception: {e}")
+                 import traceback
+                 traceback.print_exc()
+
+            print(f"[DEBUG] Call Monitor: Initiating Hard Hangup for {call_id}...")
+            
+            # 3. Hard Hangup via Telnyx API
+            try:
+                # We need to find the provider config to get the API Key.
+                # In this scope, we might not have 'provider_id'. 
+                # But we can try to find the Telnyx provider or use env var.
+                # Ideally, we should have passed provider config to this function, but let's look it up.
+                # Fallback to env var if database lookup fails or is complex here.
+                api_key = os.getenv("TELNYX_API_KEY")
+                print(f"[DEBUG] Call Monitor: Hard Hangup API Key Present: {bool(api_key)}")
+                
+                # Try to get from DB if possible
+                if not api_key:
+                    # Quick separate session lookup if needed, or rely on Env.
+                    pass
+
+                if api_key:
+                    from ..providers.telnyx import TelnyxProvider
+                    provider = TelnyxProvider(api_key=api_key)
+                    # Use 'call_id' which is the Telnyx Call Control ID mapped to 'short_id' in our loop?
+                    # Wait, 'call_id' variable in this scope IS the call_control_id (v3:...) passed to websocket_endpoint
+                    print(f"[DEBUG] Call Monitor: Sending Hangup Command for {call_id}...")
+                    result = provider.hangup_call(call_id)
+                    print(f"[DEBUG] Call Monitor: Hangup Result: {result}")
+                else:
+                    print(f"[WARN] Call Monitor: No API Key found for hard hangup.")
+
+            except Exception as e:
+                print(f"[ERROR] Call Monitor Hangup Failed: {e}")
+
+            print(f"[DEBUG] Call Monitor: Closing connection.")
+            await websocket.close(code=1000, reason="Duration Limit Reached")
+            
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+             print(f"[ERROR] Call Monitor failed: {e}")
+
+    monitor_task = asyncio.create_task(monitor_call_duration())
+
     try:
         voice_config = session.exec(select(VoiceConfig)).first()
         llm_url = (voice_config.llm_url if voice_config else None) or "http://open-webui:8080/v1"
@@ -335,6 +477,9 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
 
     stt_client = ParakeetClient(base_url=stt_url)
     tts_client = ChatterboxClient(base_url=tts_url)
+    
+    # Initialize VAD buffer early for access in inner functions
+    inbound_buffer = bytearray()
     
     start_time = asyncio.get_event_loop().time()
     full_transcription = []
@@ -377,19 +522,75 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                      await asyncio.sleep(0.02)
 
             # 2c. Preloaded Audio
-            if call_id in PRELOADED_MESSAGES:
-                 chunks = PRELOADED_MESSAGES.pop(call_id)
-                 print(f"[DEBUG] [Sender] Streaming {len(chunks)} preloaded chunks...")
+            # Poll for preloaded audio if this is an inbound call (initial_prompt is set)
+            # and it hasn't arrived yet.
+            # Poll for the *Queue* if this is an inbound call (initial_prompt is set)
+            if initial_prompt:
+                 queue = None
+                 # Use configured timeouts
+                 total_wait_sec = (llm_timeout or 10) + (tts_timeout or 10)
+                 polling_iter = int(total_wait_sec * 10)
                  
-                 for chunk_json in chunks:
-                      chunk_obj = json.loads(chunk_json)
-                      if stream_id:
-                          chunk_obj["stream_id"] = stream_id
-                      
-                      await websocket.send_text(json.dumps(chunk_obj))
-                      await asyncio.sleep(0.02)
-                 print("[DEBUG] [Sender] Preloaded audio finished. Waiting 1.5s for echo tail...")
-                 await asyncio.sleep(1.5) # Keep gate closed for echo return
+                 found_queue = False
+                 for i in range(polling_iter):
+                      if call_id in PRELOADED_STREAMS:
+                          queue = PRELOADED_STREAMS[call_id]
+                          found_queue = True
+                          break
+                      if i % 20 == 0:
+                          print(f"[DEBUG] [Sender] Waiting for Stream Queue... {i/10}s")
+                      await asyncio.sleep(0.1)
+                 
+                 if found_queue and queue:
+                     print(f"[DEBUG] [Sender] Streaming from Queue for {call_id}...")
+                     chunks_sent = 0
+                     while True:
+                         try:
+                             chunk = await queue.get()
+                             if chunk is None:
+                                 queue.task_done()
+                                 break
+                             
+                             try:
+                                 chunk_obj = json.loads(chunk)
+                                 if stream_id and "stream_id" not in chunk_obj:
+                                     chunk_obj["stream_id"] = stream_id
+                                     chunk = json.dumps(chunk_obj)
+                             except: pass
+
+                             await websocket.send_text(chunk)
+                             chunks_sent += 1
+                             queue.task_done()
+                         except Exception as e:
+                             print(f"[ERROR] Stream consumption error: {e}")
+                             break
+                     print(f"[DEBUG] [Sender] Stream finished. Sent {chunks_sent} chunks.")
+                 else:
+                     print(f"[WARN] [Sender] Stream Queue never appeared for {call_id}. Skipping.")
+            elif call_id in PRELOADED_STREAMS:
+                 # Outbound case
+                 queue = PRELOADED_STREAMS[call_id]
+                 chunks_sent = 0
+                 while True:
+                     chunk = await queue.get()
+                     if chunk is None:
+                         queue.task_done()
+                         break
+                     
+                     try:
+                         chunk_obj = json.loads(chunk)
+                         if stream_id and "stream_id" not in chunk_obj:
+                             chunk_obj["stream_id"] = stream_id
+                             chunk = json.dumps(chunk_obj)
+                     except: pass
+                     
+                     await websocket.send_text(chunk)
+                     chunks_sent += 1
+                     queue.task_done()
+                 print(f"[DEBUG] [Sender] Outbound/Ready stream finished. Sent {chunks_sent} chunks.")
+            
+            # Wait for echo tail
+            await asyncio.sleep(1.0)
                  
         except asyncio.CancelledError:
             print("[DEBUG] [Sender] Task cancelled.")
@@ -399,8 +600,9 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
         except Exception as e:
             print(f"[ERROR] [Sender] Error: {e}")
         finally:
-            print("[DEBUG] [Sender] Listening enabled (is_bot_speaking = False).")
+            print("[DEBUG] [Sender] Listening enabled (is_bot_speaking = False). Clearing Buffer.")
             is_bot_speaking = False
+            inbound_buffer.clear()
 
     DEFAULT_SYSTEM_PROMPT = """
 You are a helpful AI assistant.
@@ -646,8 +848,9 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
          except Exception as e:
              print(f"[ERROR] [Turn] Error: {e}")
          finally:
-             print(f"[DEBUG] [Turn] Listening enabled (is_bot_speaking = False).")
+             print(f"[DEBUG] [Turn] Listening enabled (is_bot_speaking = False). Clearing Buffer.")
              is_bot_speaking = False
+             inbound_buffer.clear()
 
 
     sender_task = None
@@ -657,7 +860,9 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
     # Store background tasks to prevent garbage collection
     turn_tasks = set()
 
-    inbound_buffer = bytearray()
+    turn_tasks = set()
+
+    # inbound_buffer = bytearray() # Moved to top scope
     silence_timer = 0.0 # RMS-based VAD timer
     # BUFFER_THRESHOLD = 64000 # Deprecated in favor of VAD 
     
@@ -793,26 +998,35 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
             pass
             
         # Update Call Log in DB
-        if db_id:
-            print(f"[DEBUG] Attempting to update CallLog {db_id}...")
+        if db_id or call_id:
+            print(f"[DEBUG] Attempting to update CallLog (DB: {db_id}, Control: {call_id})...")
             try:
                 end_time = asyncio.get_event_loop().time()
                 duration = int(end_time - start_time)
+                
                 session_gen = get_session()
                 db_session = next(session_gen)
-                call_log = db_session.get(CallLog, db_id)
-                if call_log:
-                    call_log.status = "completed"
-                    call_log.duration_seconds = duration
-                    call_log.transcription = "\n".join(full_transcription)
-                    # Cost calculation placeholder (e.g. $0.005/min)
-                    call_log.cost = (duration / 60) * 0.005 
-                    db_session.add(call_log)
-                    db_session.commit()
-                    print(f"[SUCCESS] Updated CallLog {db_id}: duration={duration}s, status=completed")
-                else:
-                    print(f"[ERROR] CallLog {db_id} not found in DB.")
-                db_session.close()
+                try:
+                    call_log = None
+                    if db_id:
+                        call_log = db_session.get(CallLog, db_id)
+                    elif call_id:
+                        # Fallback
+                        statement = select(CallLog).where(CallLog.call_control_id == call_id).order_by(CallLog.id.desc())
+                        call_log = db_session.exec(statement).first()
+                    
+                    if call_log:
+                        call_log.status = "completed"
+                        call_log.duration_seconds = duration
+                        call_log.transcription = "\n".join(full_transcription)
+                        call_log.cost = (duration / 60) * 0.005 
+                        db_session.add(call_log)
+                        db_session.commit()
+                        print(f"[SUCCESS] Updated CallLog {call_log.id}: duration={duration}s, status=completed")
+                    else:
+                        print(f"[WARN] CallLog not found for DB ID {db_id} or Control ID {call_id}")
+                finally:
+                    db_session.close()
             except Exception as e:
                 print(f"[ERROR] Failed to update CallLog: {e}")
 
@@ -901,7 +1115,8 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
         status="initiated" if result['success'] else "failed",
         user_id=request.user_id,
         chat_id=request.chat_id,
-        call_control_id=result.get('call_id')
+        call_control_id=result.get('call_id'),
+        direction="outbound"
     )
     session.add(call_log)
     session.commit()
@@ -916,7 +1131,9 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
              STREAM_ID_MAP[short_id] = {
                  "call_id": result.get('call_id'),
                  "db_id": call_log.id,
-                 "prompt": request.prompt
+                 "prompt": request.prompt,
+                 "max_duration": provider_config.max_call_duration or 600,
+                 "limit_message": provider_config.call_limit_message or "This call has reached its time limit. Goodbye."
              }
              print(f"Mapped {short_id} -> {result.get('call_id')} (DB: {call_log.id})")
              
@@ -929,13 +1146,21 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
 
 
         if audio_buffer:
-            PRELOADED_MESSAGES[result.get('call_id')] = audio_buffer
-            print(f"Stored {len(audio_buffer)} preloaded chunks for {result.get('call_id')}")
+            # Create a queue and pre-fill it for consistency with streaming logic
+            # Since audio_buffer is already fully generated here (initiate_call is blocking on it)
+            # We can just put them all in.
+            q = Queue()
+            for chunk in audio_buffer:
+                q.put_nowait(chunk)
+            q.put_nowait(None) # EOF
+            
+            PRELOADED_STREAMS[result.get('call_id')] = q
+            print(f"Stored {len(audio_buffer)} preloaded chunks in Queue for {result.get('call_id')}")
 
     return {"status": "initiated", "call_id": result.get('call_id'), "db_id": call_log.id}
 
 @router.post("/voice/webhook")
-async def webhook_handler(request: dict, token: str, raw_request: Request, session: Session = Depends(get_session)):
+async def webhook_handler(request: dict, token: str, raw_request: Request, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     """
     Handle inbound webhooks from Telnyx.
     Requires 'token' query parameter matching a valid ProviderConfig.webhook_secret.
@@ -947,32 +1172,124 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, sessi
         raise HTTPException(status_code=403, detail="Unauthorized")
     
     event_type = request.get("data", {}).get("event_type")
+    payload = request.get("data", {}).get("payload", {})
+    call_control_id = payload.get("call_control_id")
+    direction = payload.get("direction", "inbound")
     
-    if event_type == "call.answered":
-        # Start Media Stream
-        payload_data = request.get("data", {}).get("payload", {})
-        call_control_id = payload_data.get("call_control_id")
-        
+    print(f"[DEBUG] Webhook Event: {event_type} | ID: {call_control_id} | Dir: {direction}")
+
+    if event_type == "call.initiated":
+        if direction in ["inbound", "incoming"]:
+             # CHECK ENABLED STATUS
+             if not provider.inbound_enabled:
+                 print(f"[DEBUG] Inbound call rejected: Provider {provider.name} inbound_enabled=False")
+                 # Optional: Hangup or Reject. Telnyx usually expects action.
+                 # Let's perform a hangup/reject action if possible, or just ignore (which leads to timeout).
+                 # For now, just logging and doing nothing (soft reject).
+                 return {"status": "rejected"}
+                 
+             print(f"[DEBUG] Inbound Call Initiated! Answering...")
+             
+             # Resolve Base URL
+             base_url = provider.base_url
+             scheme = "http"
+             if not base_url:
+                 host = raw_request.headers.get("host") or "localhost"
+                 scheme = raw_request.headers.get("x-forwarded-proto", raw_request.url.scheme)
+                 base_url = f"{scheme}://{host}"
+             
+             # FORCE FALLBACK for local IPs
+             if base_url and ("192.168" in base_url or "localhost" in base_url or "127.0.0.1" in base_url):
+                  base_url = "https://telnyx-webhooks.sandoval.io" 
+             
+             import uuid
+             short_id = uuid.uuid4().hex
+             base_clean = base_url.replace("http://", "").replace("https://", "")
+             is_secure = "https" in base_url or (scheme and "https" in str(scheme).lower())
+             if "ngrok" in base_clean or "sandoval.io" in base_clean or "loca.lt" in base_clean:
+                 is_secure = True
+             protocol = "wss" if is_secure else "ws"
+             stream_url = f"{protocol}://{base_clean}/api/voice/stream/{short_id}?token={token}"
+             
+             print(f"[DEBUG] Generated Stream URL for Inbound: {stream_url}")
+
+             # Inject Inbound System Prompt
+             inbound_prompt = provider.inbound_system_prompt
+             
+             # Inject Inbound System Prompt
+             inbound_prompt = provider.inbound_system_prompt
+             
+             # MOVED STREAM_ID_MAP population to after CallLog creation to capture DB ID
+             
+             # Fetch VoiceConfig for Codec AND for LLM Preloading
+             codec = "PCMU"
+             voice_config = None
+             try:
+                 voice_config = session.exec(select(VoiceConfig)).first()
+                 if voice_config:
+                     codec = getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
+             except: pass
+
+             # Trigger Background LLM Generation for Greeting
+             if inbound_prompt:
+                 print(f"[DEBUG] Scheduling Inbound Greeting Generation for {call_control_id}")
+                 
+                 # Construct Voice Config Data (copied from initiate_call logic)
+                 vc_data = {
+                   "llm_url": (voice_config.llm_url if voice_config else None) or "http://open-webui:8080/v1",
+                   "llm_api_key": decrypt_value(voice_config.llm_api_key) if voice_config and voice_config.llm_api_key else None,
+                   "llm_model": (voice_config.llm_model if voice_config else None) or "gpt-3.5-turbo",
+                   "voice_id": (voice_config.voice_id if voice_config else None) or "default",
+                   "llm_timeout": getattr(voice_config, "llm_timeout", 10),
+                   "tts_timeout": getattr(voice_config, "tts_timeout", 10),
+                   "tts_url": (voice_config.tts_url if voice_config else None) or "http://chatterbox:8000",
+                   "system_prompt": inbound_prompt, # Use Provider Intent as System Prompt
+                   "rtp_codec": codec
+                 }
+                 # Use "Introduce yourself" as the trigger for the bot to speak first
+                 background_tasks.add_task(preload_inbound_audio, call_control_id, inbound_prompt, vc_data)
+
+             from ..providers.telnyx import TelnyxProvider
+             telnyx_provider = TelnyxProvider(api_key=decrypt_value(provider.api_key))
+             # Answer WITH Stream Params (RTP + Codec + URL)
+             resp = telnyx_provider.answer_call(
+                 call_control_id, 
+                 stream_url=stream_url,
+                 mode="rtp",
+                 codec=codec
+             )
+             
+             # 2. Log it
+             call_log = CallLog(
+                to_number=payload.get("to", "unknown"),
+                from_number=payload.get("from", "unknown"),
+                status="ringing",
+                call_control_id=call_control_id,
+                direction="inbound"
+             )
+             session.add(call_log)
+             session.commit()
+             session.refresh(call_log)
+
+             # Store Context Map (Before Answer)
+             STREAM_ID_MAP[short_id] = {
+                 "call_id": call_control_id,
+                 "db_id": call_log.id,
+                 "prompt": inbound_prompt,
+                 "max_duration": provider.max_call_duration or 600,
+                 "limit_message": provider.call_limit_message or "This call has reached its time limit. Goodbye."
+             }
+             
+             if not resp.get("success"):
+                 print(f"[ERROR] Failed to answer inbound call: {resp.get('error')}")
+
+    elif event_type == "call.answered":
         print(f"Call Answered! Control ID: {call_control_id}")
-        
-        # Resolve Base URL
-        base_url = provider.base_url
-        scheme = "http" # Default
-        if not base_url:
-            # Fallback to request headers
-            host = raw_request.headers.get("host")
-            scheme = raw_request.headers.get("x-forwarded-proto", raw_request.url.scheme)
-            if host:
-                base_url = f"{scheme}://{host}"
-                print(f"Warning: Provider base_url missing. Using fallback: {base_url}")
-        
-        if base_url and call_control_id:
-            print(f"Call Answered. Stream should have been auto-started via Dial.")
-            # Stream initiation moved to 'make_call' (Dial) to avoid 422 race conditions.
-            # No manual start_streaming needed here.
+        if direction not in ["inbound", "incoming"]:
+           print(f"[DEBUG] Outbound Call Answered. Stream assumed active.")
             
     elif event_type == "call.hangup":
-         print(f"Call Hangup: {request.get('data', {}).get('payload', {})}")
+         print(f"Call Hangup: {payload}")
     
     return {"status": "ok"}
 

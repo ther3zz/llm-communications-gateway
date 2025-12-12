@@ -62,14 +62,18 @@ class SMSSendRequest(BaseModel):
 
 class ProviderConfigCreate(BaseModel):
     name: str
-    api_key: str
+    api_key: Optional[str] = None
     api_url: Optional[str] = None
     from_number: Optional[str] = None
-    app_id: Optional[str] = None
     app_id: Optional[str] = None
     enabled: bool = True
     priority: int = 0
     webhook_secret: Optional[str] = None
+    base_url: Optional[str] = None
+    inbound_system_prompt: Optional[str] = None
+    inbound_enabled: bool = True
+    max_call_duration: Optional[int] = 600
+    call_limit_message: Optional[str] = "This call has reached its time limit. Goodbye."
 
 def get_provider_instance(name: str, config: ProviderConfig):
     if name == 'telnyx':
@@ -218,6 +222,9 @@ def get_providers(session: Session = Depends(get_session)):
 
 @router.post("/config/providers", response_model=ProviderConfig)
 def create_provider(provider: ProviderConfigCreate, session: Session = Depends(get_session)):
+    if not provider.api_key:
+        raise HTTPException(status_code=400, detail="API Key is required for new providers")
+    
     p_data = provider.dict()
     if p_data.get('api_key'):
         p_data['api_key'] = encrypt_value(p_data['api_key'])
