@@ -389,7 +389,13 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                       # Inject stream_id
                       chunk_obj = json.loads(msg_json)
                       chunk_obj["stream_id"] = short_id
-                      await websocket.send_text(json.dumps(chunk_obj))
+                      try:
+                          await websocket.send_text(json.dumps(chunk_obj))
+                      except RuntimeError as e:
+                           if "close message has been sent" in str(e):
+                               print("[DEBUG] Call Monitor: Socket closed during TTS. Stopping.")
+                               return
+                           raise e
                  
                  # Wait for playback (approx 2s buffer trail)
                  await asyncio.sleep(2.0)
@@ -589,8 +595,8 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                      queue.task_done()
                  print(f"[DEBUG] [Sender] Outbound/Ready stream finished. Sent {chunks_sent} chunks.")
             
-            # Wait for echo tail
-            await asyncio.sleep(1.0)
+            # Wait for echo tail (increased for inbound latency)
+            await asyncio.sleep(2.0)
                  
         except asyncio.CancelledError:
             print("[DEBUG] [Sender] Task cancelled.")
@@ -985,6 +991,9 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                 pass
             except Exception as e:
                 print(f"[ERROR] Sender task error: {e}")
+
+        if monitor_task:
+             monitor_task.cancel()
 
         # Cancel any ongoing turn tasks (LLM generation/TTS)
         if turn_tasks:
