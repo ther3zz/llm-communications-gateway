@@ -1,7 +1,7 @@
 # LLM Communications Gateway
 
 > [!CAUTION]
-> **SECURITY WARNING**: Please do **not** open this application to the public internet! Better security is planned but not yet implemented. Run this only on a trusted private network behind a secure tunnel (like ngrok) or VPN.
+> **SECURITY WARNING**: Please do **not** open this application to the public internet! Better security is planned but not yet implemented. Run this only on a trusted private network behind a secure tunnel (like ngrok or cloudflare WAF) or VPN.
 
 A powerful, self-hosted gateway for building Voice AI applications with LLMs. Connects Telnyx telephony to your local or remote LLMs (Open WebUI, Ollama, OpenAI) with low-latency Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).
 
@@ -20,6 +20,9 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 - Docker Desktop / Docker Compose
 - A Telnyx Account (API Key and Phone Number) - **Note:** Telnyx is the only provider currently tested and confirmed working for Voice/SMS.
 - An LLM Provider (Ollama running locally, Open WebUI, or OpenAI Key)
+- **STT & TTS Services**: This project was developed and **tested specifically** against the following forks:
+    - **Parakeet (STT)**: [ther3zz/parakeet-tdt-0.6b-v2-fastapi](https://github.com/ther3zz/parakeet-tdt-0.6b-v2-fastapi)
+    - **Chatterbox (TTS)**: [ther3zz/chatterbox-tts-api/tree/patch-1](https://github.com/ther3zz/chatterbox-tts-api/tree/patch-1)
 
 ## Fast Start
 
@@ -86,6 +89,6 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 ## Architecture
 
 -   **Gateway (FastAPI)**: Orchestrates calls, VAD, and LLM communication.
--   **Parakeet**: Fast non-streaming STT.
--   **Chatterbox**: Fast streaming TTS.
+-   **Parakeet**: Fast non-streaming STT ([Tested Fork](https://github.com/ther3zz/parakeet-tdt-0.6b-v2-fastapi)).
+-   **Chatterbox**: Fast streaming TTS ([Tested Fork](https://github.com/ther3zz/chatterbox-tts-api/tree/patch-1)).
 -   **Postgres**: Persistent storage for logs and config (swappable with SQLite).
