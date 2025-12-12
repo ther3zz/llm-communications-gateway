@@ -277,16 +277,33 @@ class TelnyxProvider(SMSProvider):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def start_media_stream(self, call_control_id: str, stream_url: str) -> Dict:
+    def start_media_stream(self, call_control_id: str, stream_url: str, stream_track: str = "both_tracks", mode: str = None, codec: str = None) -> Dict:
         try:
-            # Inspection revealed start_streaming is on calls.actions
-            # signature: start_streaming(call_control_id, stream_url=..., ...)
-            resp = self.client.calls.actions.start_streaming(
-                call_control_id,
-                stream_url=stream_url,
-                stream_track="both_tracks" 
-            )
-            return {"success": True, "data": resp}
+            # Use Direct REST API for full control
+            import requests
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "stream_url": stream_url,
+                "stream_track": stream_track
+            }
+            if mode:
+                payload["stream_bidirectional_mode"] = mode
+            if codec:
+                payload["stream_bidirectional_codec"] = codec
+            
+            print(f"[DEBUG] Start Streaming Payload: {json.dumps(payload, indent=2)}")
+            
+            url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/streaming_start"
+            resp = requests.post(url, headers=headers, json=payload)
+            print(f"[DEBUG] Start Streaming Response: {resp.status_code} {resp.text}")
+            
+            if resp.status_code >= 400:
+                 return {"success": False, "error": resp.text}
+                 
+            return {"success": True, "data": resp.json()}
         except Exception as e:
              return {"success": False, "error": str(e)}
 
@@ -317,3 +334,41 @@ class TelnyxProvider(SMSProvider):
             return {"success": True, "data": resp.json()}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def answer_call(self, call_control_id: str, stream_url: str = None, stream_track: str = "both_tracks", mode: str = None, codec: str = None) -> Dict:
+        """
+        Answers an inbound call. Optionally starts streaming immediately if stream_url is provided.
+        """
+        try:
+             import requests
+             headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+             }
+             payload = {
+                 "call_control_id": call_control_id,
+                 "command_id": "answer_command"
+             }
+             if stream_url:
+                 # Support Streaming on Answer!
+                 payload["stream_url"] = stream_url
+                 payload["stream_track"] = stream_track
+                 if mode:
+                    payload["stream_bidirectional_mode"] = mode
+                 if codec:
+                    payload["stream_bidirectional_codec"] = codec
+                 
+                 # Note: client_state is NOT supported in answer command usually, or at least not needed for stream setup here.
+                 # We keep it simple.
+
+             print(f"[DEBUG] Answering Call {call_control_id} (Stream: {bool(stream_url)})... Payload: {json.dumps(payload, indent=2)}")
+             url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/answer"
+             resp = requests.post(url, headers=headers, json=payload)
+             print(f"[DEBUG] Answer Response: {resp.status_code} {resp.text}")
+             
+             if resp.status_code >= 400:
+                 return {"success": False, "error": resp.text}
+                 
+             return {"success": True, "data": resp.json()}
+        except Exception as e:
+             return {"success": False, "error": str(e)}
