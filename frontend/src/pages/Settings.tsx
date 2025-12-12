@@ -13,6 +13,10 @@ interface UtilProvider {
     priority: number;
     webhook_secret?: string;
     base_url?: string;
+    inbound_system_prompt?: string;
+    inbound_enabled?: boolean;
+    max_call_duration?: number;
+    call_limit_message?: string;
 }
 
 interface ChatterboxVoice {
@@ -78,7 +82,11 @@ export default function Settings() {
         enabled: true,
         priority: 0,
         from_number: '',
-        app_id: ''
+        app_id: '',
+        inbound_system_prompt: '',
+        inbound_enabled: true,
+        max_call_duration: 600,
+        call_limit_message: "This call has reached its time limit. Goodbye."
     });
 
     const [editingId, setEditingId] = useState<number | null>(null);
@@ -221,7 +229,7 @@ export default function Settings() {
     };
 
     const handleCancelEdit = () => {
-        setNewProvider({ name: 'telnyx', api_key: '', enabled: true, priority: 0, from_number: '', app_id: '' });
+        setNewProvider({ name: 'telnyx', api_key: '', enabled: true, priority: 0, from_number: '', app_id: '', inbound_system_prompt: '', inbound_enabled: true, max_call_duration: 600, call_limit_message: "This call has reached its time limit. Goodbye." });
         setEditingId(null);
     };
 
@@ -465,6 +473,56 @@ export default function Settings() {
                             )}
                         </div>
                         <p className="text-xs text-slate-400 mt-1">This token secures inbound webhooks. Use the "Sync" button in the list to update Telnyx.</p>
+                    </div>
+
+                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <label className="checkbox-label mb-4">
+                            <input
+                                type="checkbox"
+                                checked={newProvider.inbound_enabled !== false}
+                                onChange={e => setNewProvider({ ...newProvider, inbound_enabled: e.target.checked })}
+                            />
+                            Enable Inbound Calls
+                        </label>
+
+                        <h3 className="text-sm font-semibold text-slate-300 mt-4 mb-2">Call Duration Limits</h3>
+                        <div className="grid-2 mb-2">
+                            <div className="form-group">
+                                <label className="form-label">Max Duration (Seconds)</label>
+                                <input
+                                    type="number"
+                                    className="form-input"
+                                    value={newProvider.max_call_duration || ''}
+                                    onChange={e => setNewProvider({ ...newProvider, max_call_duration: parseInt(e.target.value) })}
+                                    placeholder="600"
+                                />
+                                <p className="text-xs text-slate-500 mt-1">Default: 600s (10 minutes)</p>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Limit Message</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={newProvider.call_limit_message || ''}
+                                    onChange={e => setNewProvider({ ...newProvider, call_limit_message: e.target.value })}
+                                    placeholder="This call has reached its time limit. Goodbye."
+                                />
+                                <p className="text-xs text-slate-500 mt-1">TTS message played before hangup.</p>
+                            </div>
+                        </div>
+                        {newProvider.inbound_enabled !== false && (
+                            <>
+                                <label className="form-label">Inbound System Prompt (Optional)</label>
+                                <textarea
+                                    className="form-input"
+                                    value={newProvider.inbound_system_prompt || ''}
+                                    onChange={e => setNewProvider({ ...newProvider, inbound_system_prompt: e.target.value })}
+                                    placeholder="You are a polite receptionist..."
+                                    style={{ minHeight: '80px', resize: 'vertical' }}
+                                />
+                                <p className="text-xs text-slate-400 mt-1">Specific prompt for calls to this number.</p>
+                            </>
+                        )}
                     </div>
                 </div>
                 <div className="flex gap-2">

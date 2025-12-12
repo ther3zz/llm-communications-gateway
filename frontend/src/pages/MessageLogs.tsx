@@ -26,6 +26,7 @@ interface CallLog {
     transcription?: string;
     user_id?: string;
     chat_id?: string;
+    direction?: string;
 }
 
 export default function MessageLogs() {
@@ -34,7 +35,7 @@ export default function MessageLogs() {
     const [voiceData, setVoiceData] = useState<{ logs: CallLog[], total: number }>({ logs: [], total: 0 });
     const [loading, setLoading] = useState(false);
     const [page, setPage] = useState(1);
-    const limit = 20;
+    const limit = 50;
 
     useEffect(() => {
         setPage(1); // Reset page on view switch
@@ -154,27 +155,30 @@ export default function MessageLogs() {
                             <thead>
                                 <tr>
                                     <th>Time</th>
-                                    <th>Result</th>
-                                    <th>Contact</th>
+                                    <th>Direction</th>
+                                    <th>To</th>
+                                    <th>From</th>
                                     <th>User / Chat</th>
                                     <th>Duration</th>
-                                    <th>Transcription</th>
+                                    <th>Status</th>
                                     <th className="text-right">Cost</th>
+                                    <th>Transcription</th>
                                 </tr>
                             </thead>
                             <tbody style={{ opacity: loading ? 0.5 : 1, transition: 'opacity 0.2s' }}>
                                 {voiceData.logs.map((log) => (
                                     <tr key={log.id}>
-                                        <td style={{ whiteSpace: 'nowrap' }}>{new Date(log.timestamp).toLocaleString()}</td>
+                                        <td className="text-sm text-slate-400" style={{ whiteSpace: 'nowrap' }}>
+                                            {new Date(log.timestamp).toLocaleString()}
+                                        </td>
                                         <td>
-                                            <span className={`badge ${log.status === 'completed' ? 'badge-sent' : log.status === 'failed' ? 'badge-failed' : 'badge-default'}`}>
-                                                {log.status}
+                                            <span className={`badge ${log.direction === 'inbound' ? 'badge-blue' : 'badge-purple'}`}>
+                                                {log.direction === 'inbound' ? <ArrowLeft size={12} /> : <ArrowRight size={12} />}
+                                                <span className="ml-1 capitalize">{log.direction || 'outbound'}</span>
                                             </span>
                                         </td>
-                                        <td>
-                                            <div className="text-sm">{log.to_number}</div>
-                                            <div className="text-xs text-slate-500">from {log.from_number}</div>
-                                        </td>
+                                        <td>{log.to_number}</td>
+                                        <td>{log.from_number}</td>
                                         <td>
                                             {(log.user_id || log.chat_id) ? (
                                                 <div className="flex flex-col gap-1">
@@ -195,15 +199,20 @@ export default function MessageLogs() {
                                                 <span className="text-slate-700">-</span>
                                             )}
                                         </td>
-                                        <td>{log.duration_seconds}s</td>
-                                        <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.transcription}>
-                                            {log.transcription || <span className="text-slate-600 italic">No input</span>}
+                                        <td>{log.duration_seconds || 0}s</td>
+                                        <td>
+                                            <span className={`badge ${log.status === 'completed' ? 'badge-sent' : log.status === 'failed' ? 'badge-failed' : 'badge-default'}`}>
+                                                {log.status}
+                                            </span>
                                         </td>
                                         <td className="text-right">${(log.cost || 0).toFixed(4)}</td>
+                                        <td style={{ maxWidth: '600px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={log.transcription}>
+                                            {log.transcription || <span className="text-slate-600 italic">No input</span>}
+                                        </td>
                                     </tr>
                                 ))}
                                 {voiceData.logs.length === 0 && (
-                                    <tr><td colSpan={6} className="text-center" style={{ padding: '3rem' }}>No calls found</td></tr>
+                                    <tr><td colSpan={9} className="text-center" style={{ padding: '3rem' }}>No calls found</td></tr>
                                 )}
                             </tbody>
                         </table>
