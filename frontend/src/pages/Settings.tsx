@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Save, Plus, Trash2, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
+import { Save, Plus, Trash2, CheckCircle, XCircle, RefreshCw, Users, Shield } from 'lucide-react';
 
 interface UtilProvider {
     id?: number;
@@ -17,6 +17,8 @@ interface UtilProvider {
     inbound_enabled?: boolean;
     max_call_duration?: number;
     call_limit_message?: string;
+    assigned_user_id?: string;
+    assigned_user_label?: string;
 }
 
 interface ChatterboxVoice {
@@ -44,6 +46,7 @@ interface VoiceConfig {
     system_prompt?: string;
     send_conversation_context?: boolean;
     rtp_codec?: string;
+    open_webui_admin_token?: string;
 }
 
 interface EnvDefaults {
@@ -51,6 +54,13 @@ interface EnvDefaults {
     openwebui_url?: string;
     base_url?: string;
     system_prompt?: string;
+}
+
+interface OpenWebUIUser {
+    id: string;
+    name: string;
+    email: string;
+    role: string;
 }
 
 export default function Settings() {
@@ -96,6 +106,11 @@ export default function Settings() {
     const [llmBaseDomain, setLlmBaseDomain] = useState('');
     const [envDefaults, setEnvDefaults] = useState<EnvDefaults>({});
 
+    // UI Tabs
+    const [activeTab, setActiveTab] = useState<'providers' | 'voice' | 'integrations'>('providers');
+    const [openWebUIUsers, setOpenWebUIUsers] = useState<OpenWebUIUser[]>([]);
+    const [fetchingUsers, setFetchingUsers] = useState(false);
+
     // useEffect(() => {
     //    if (!voiceConfig.llm_url) return;
     //    // ... heuristic removed in favor of explicit llm_provider logic ...
@@ -125,7 +140,7 @@ export default function Settings() {
     const handleBaseDomainChange = (domain: string) => {
         setLlmBaseDomain(domain);
         let suffix = '/v1';
-        if (llmProvider === 'openwebui') suffix = '/v1';
+        if (llmProvider === 'openwebui') suffix = '/api/v1';
 
         // Remove trailing slash from domain
         const cleanDomain = domain.replace(/\/$/, "");
@@ -139,8 +154,21 @@ export default function Settings() {
         loadProviders();
         loadVoiceConfig();
         fetchVoices(false);
+        loadVoiceConfig();
+        fetchVoices(false);
         fetchModels(false);
     }, []);
+
+    // Effect: If integration tab is active, try to fetch users if we have token
+    useEffect(() => {
+        if (activeTab === 'integrations' || activeTab === 'providers') {
+            // We can try fetching users proactively if we think we have a token,
+            // but usually we rely on manual fetch or initial load if we want to be smart.
+            // For now, let's just let user click "Fetch" or load on mount if configured?
+            // Actually, let's load users if we have voiceConfig loaded and it has a hidden token (we don't know if it's valid though).
+            // Better: lazy load or manual refresh.
+        }
+    }, [activeTab]);
 
     const loadProviders = async () => {
         try {
@@ -218,6 +246,27 @@ export default function Settings() {
             console.error(e);
             const msg = e.response?.data?.detail || "Failed to connect to Parakeet.";
             alert(msg);
+        }
+    };
+
+    const fetchOpenWebUIUsers = async () => {
+        setFetchingUsers(true);
+        try {
+            const res = await axios.get('/api/integrations/openwebui/users');
+            const users = Array.isArray(res.data) ? res.data : (res.data.users || []);
+            if (Array.isArray(users)) {
+                setOpenWebUIUsers(users);
+                if (users.length === 0) {
+                    alert("No users found. Check your Admin Token and Open WebUI URL.");
+                } else {
+                    // alert(`Found ${users.length} users.`);
+                }
+            }
+        } catch (e: any) {
+            console.error(e);
+            alert("Failed to fetch users: " + (e.response?.data?.detail || e.message));
+        } finally {
+            setFetchingUsers(false);
         }
     };
 
@@ -359,504 +408,576 @@ export default function Settings() {
     return (
         <div style={{ maxWidth: '800px', margin: '0 auto' }}>
             <div className="mb-4">
-                <h1 className="card-title" style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>Provider Configuration</h1>
-                <p className="text-slate-400">Manage your SMS providers and API keys.</p>
+                <h1 className="card-title" style={{ fontSize: '1.5rem', marginBottom: '0.5rem' }}>Configuration</h1>
+                <p className="text-slate-400">Manage connectivity, voice settings, and integrations.</p>
             </div>
 
-            {/* Add/Edit Provider */}
-            <div className="card">
-                <h2 className="card-title">
-                    {editingId ? <RefreshCw size={20} color="var(--accent-blue)" /> : <Plus size={20} color="var(--accent-blue)" />}
-                    {editingId ? 'Edit Provider' : 'Add Provider'}
-                </h2>
-                <div className="grid-2 mb-4">
-                    <div className="form-group">
-                        <label className="form-label">Provider Name</label>
-                        <select
-                            className="form-select"
-                            value={newProvider.name}
-                            onChange={e => setNewProvider({ ...newProvider, name: e.target.value })}
-                            disabled={!!editingId} // Prevent changing name on edit if we want to enforce consistency, or allow it. Pydantic schema allows. safely allow.
-                        >
-                            <option value="telnyx">Telnyx</option>
-                            <option value="twilio">Twilio (Stub)</option>
-                            <option value="commio">Commio (Stub)</option>
-                            <option value="mock">Mock Provider</option>
-                        </select>
+            {/* Tabs */}
+            <div className="tab-container">
+                <button
+                    className={`tab-button ${activeTab === 'providers' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('providers')}
+                >
+                    Providers
+                </button>
+                <button
+                    className={`tab-button ${activeTab === 'voice' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('voice')}
+                >
+                    Voice Settings
+                </button>
+                <button
+                    className={`tab-button ${activeTab === 'integrations' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('integrations')}
+                >
+                    Integrations
+                </button>
+            </div>
+
+            {/* PROVIDERS TAB */}
+            {activeTab === 'providers' && (
+                <>
+                    {/* Add/Edit Provider */}
+                    <div className="card">
+                        <h2 className="card-title">
+                            {editingId ? <RefreshCw size={20} color="var(--accent-blue)" /> : <Plus size={20} color="var(--accent-blue)" />}
+                            {editingId ? 'Edit Provider' : 'Add Provider'}
+                        </h2>
+                        <div className="grid-2 mb-4">
+                            <div className="form-group">
+                                <label className="form-label">Provider Name</label>
+                                <select
+                                    className="form-select"
+                                    value={newProvider.name}
+                                    onChange={e => setNewProvider({ ...newProvider, name: e.target.value })}
+                                    disabled={!!editingId}
+                                >
+                                    <option value="telnyx">Telnyx</option>
+                                    <option value="twilio">Twilio (Stub)</option>
+                                    <option value="commio">Commio (Stub)</option>
+                                    <option value="mock">Mock Provider</option>
+                                </select>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Priority (0 = High)</label>
+                                <input
+                                    type="number"
+                                    className="form-input"
+                                    value={newProvider.priority}
+                                    onChange={e => setNewProvider({ ...newProvider, priority: parseInt(e.target.value) })}
+                                />
+                            </div>
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">API Key / Token {editingId && '(Leave blank to keep unchanged)'}</label>
+                                <input
+                                    type="password"
+                                    className="form-input"
+                                    value={newProvider.api_key}
+                                    onChange={e => setNewProvider({ ...newProvider, api_key: e.target.value })}
+                                    placeholder={editingId ? "********" : "sk_..."}
+                                />
+                            </div>
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">Base URL (Public)</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={newProvider.base_url || ''}
+                                    onChange={e => setNewProvider({ ...newProvider, base_url: e.target.value })}
+                                    placeholder="https://myapp.ngrok.io"
+                                />
+                            </div>
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">From Number (Optional)</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={newProvider.from_number || ''}
+                                    onChange={e => setNewProvider({ ...newProvider, from_number: e.target.value })}
+                                    placeholder="+15550000000"
+                                />
+                            </div>
+                            {newProvider.name === 'telnyx' && (
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">App ID / Connection ID (Voice)</label>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={newProvider.app_id || ''}
+                                            onChange={e => setNewProvider({ ...newProvider, app_id: e.target.value })}
+                                            placeholder="1234567890"
+                                        />
+                                        <button
+                                            onClick={(e) => { e.preventDefault(); handleCreateApp(); }}
+                                            className="btn btn-secondary"
+                                            title="Create New App on Telnyx"
+                                        >
+                                            <Plus size={18} /> Create App
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="form-label">Webhook Secret Token</label>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={newProvider.webhook_secret || 'Auto-generated on save'}
+                                        readOnly
+                                        style={{ backgroundColor: '#f1f5f9', color: '#64748b' }}
+                                    />
+                                    {editingId && (
+                                        <button
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                if (confirm("Regenerate webhook token? You will need to re-sync with Telnyx.")) {
+                                                    const newToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+                                                    setNewProvider({ ...newProvider, webhook_secret: newToken });
+                                                }
+                                            }}
+                                            className="btn btn-secondary"
+                                            title="Regenerate Token"
+                                        >
+                                            <RefreshCw size={18} />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                <label className="checkbox-label mb-4">
+                                    <input
+                                        type="checkbox"
+                                        checked={newProvider.inbound_enabled !== false}
+                                        onChange={e => setNewProvider({ ...newProvider, inbound_enabled: e.target.checked })}
+                                    />
+                                    Enable Inbound Calls
+                                </label>
+
+                                <h3 className="text-sm font-semibold text-slate-300 mt-4 mb-2">Call Routing & Limits</h3>
+                                <div className="grid-2 mb-2">
+                                    <div className="form-group">
+                                        <label className="form-label">Max Duration (Seconds)</label>
+                                        <input
+                                            type="number"
+                                            className="form-input"
+                                            value={newProvider.max_call_duration || ''}
+                                            onChange={e => setNewProvider({ ...newProvider, max_call_duration: parseInt(e.target.value) })}
+                                            placeholder="600"
+                                        />
+                                    </div>
+                                    <div className="form-group">
+                                        <label className="form-label">Limit Message</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={newProvider.call_limit_message || ''}
+                                            onChange={e => setNewProvider({ ...newProvider, call_limit_message: e.target.value })}
+                                            placeholder="Goodbye."
+                                        />
+                                    </div>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label flex items-center gap-2">
+                                        <Users size={16} /> Route to Open WebUI User
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <select
+                                            className="form-select"
+                                            value={newProvider.assigned_user_id || ''}
+                                            onChange={e => {
+                                                const uid = e.target.value;
+                                                const u = openWebUIUsers.find(u => u.id === uid);
+                                                setNewProvider({
+                                                    ...newProvider,
+                                                    assigned_user_id: uid || undefined,
+                                                    assigned_user_label: u ? `${u.name} (${u.email})` : undefined
+                                                });
+                                            }}
+                                        >
+                                            <option value="">-- No specific assignment --</option>
+                                            {openWebUIUsers.map(u => (
+                                                <option key={u.id} value={u.id}>
+                                                    {u.name} ({u.role})
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <button
+                                            onClick={(e) => { e.preventDefault(); fetchOpenWebUIUsers(); }}
+                                            className="btn btn-secondary"
+                                            disabled={fetchingUsers}
+                                            title="Fetch Users from Open WebUI"
+                                        >
+                                            <RefreshCw size={18} className={fetchingUsers ? 'animate-spin' : ''} />
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-slate-400 mt-1">Requires Admin Token in Integrations tab.</p>
+                                </div>
+
+                                {newProvider.inbound_enabled !== false && (
+                                    <>
+                                        <label className="form-label mt-4">Inbound System Prompt (Optional)</label>
+                                        <textarea
+                                            className="form-input"
+                                            value={newProvider.inbound_system_prompt || ''}
+                                            onChange={e => setNewProvider({ ...newProvider, inbound_system_prompt: e.target.value })}
+                                            placeholder="You are a polite receptionist..."
+                                            style={{ minHeight: '80px', resize: 'vertical' }}
+                                        />
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex gap-2">
+                            <button
+                                onClick={handleSaveProvider}
+                                disabled={loading}
+                                className="btn btn-primary"
+                            >
+                                <Save size={18} />
+                                {editingId ? 'Update Provider' : 'Save Provider'}
+                            </button>
+                            {editingId && (
+                                <button
+                                    onClick={handleCancelEdit}
+                                    className="btn btn-secondary"
+                                >
+                                    Cancel
+                                </button>
+                            )}
+                        </div>
                     </div>
-                    <div className="form-group">
-                        <label className="form-label">Priority (0 = High)</label>
-                        <input
-                            type="number"
-                            className="form-input"
-                            value={newProvider.priority}
-                            onChange={e => setNewProvider({ ...newProvider, priority: parseInt(e.target.value) })}
-                        />
+
+                    {/* List */}
+                    <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+                        <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
+                            <h2 className="card-title" style={{ margin: 0 }}>Configured Providers</h2>
+                        </div>
+                        <div>
+                            {providers.map(p => (
+                                <div key={p.id} className="flex justify-between items-center" style={{ padding: '1rem 1.5rem', borderBottom: '1px solid rgba(51, 65, 85, 0.3)' }}>
+                                    <div className="flex items-center gap-4">
+                                        <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: p.enabled ? 'var(--accent-green)' : 'var(--text-secondary)' }} />
+                                        <div>
+                                            <div style={{ fontWeight: 500, textTransform: 'capitalize' }}>{p.name}</div>
+                                            <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+                                                Priority: {p.priority} | From: {p.from_number || 'Default'}
+                                                {p.assigned_user_label && (
+                                                    <span className="ml-2 px-2 py-0.5 rounded bg-blue-900/30 text-blue-300 text-xs border border-blue-800">
+                                                        Assigned: {p.assigned_user_label}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-2">
+                                        {p.name === 'telnyx' && (
+                                            <button
+                                                onClick={() => handleSync(p)}
+                                                className="btn btn-secondary"
+                                                style={{ padding: '0.5rem' }}
+                                                title="Sync Telnyx App Webhooks"
+                                            >
+                                                <RefreshCw size={20} />
+                                            </button>
+                                        )}
+                                        <button
+                                            onClick={() => handleEdit(p)}
+                                            className="btn btn-secondary"
+                                            style={{ padding: '0.5rem' }}
+                                            title="Edit"
+                                        >
+                                            Edit
+                                        </button>
+                                        <button
+                                            onClick={() => handleToggle(p)}
+                                            className="btn btn-icon"
+                                            title={p.enabled ? "Disable" : "Enable"}
+                                            style={{ color: p.enabled ? 'var(--accent-green)' : 'var(--text-secondary)' }}
+                                        >
+                                            {p.enabled ? <CheckCircle size={20} /> : <XCircle size={20} />}
+                                        </button>
+                                        <button
+                                            onClick={() => p.id && handleDelete(p.id)}
+                                            className="btn btn-icon btn-icon-danger"
+                                            title="Delete"
+                                        >
+                                            <Trash2 size={20} />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                            {providers.length === 0 && (
+                                <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>No providers configured yet.</div>
+                            )}
+                        </div>
                     </div>
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">API Key / Token {editingId && '(Leave blank to keep unchanged)'}</label>
-                        <input
-                            type="password"
-                            className="form-input"
-                            value={newProvider.api_key}
-                            onChange={e => setNewProvider({ ...newProvider, api_key: e.target.value })}
-                            placeholder={editingId ? "********" : "sk_..."}
-                        />
-                    </div>
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">Base URL (Public)</label>
-                        <input
-                            type="text"
-                            className="form-input"
-                            value={newProvider.base_url || ''}
-                            onChange={e => setNewProvider({ ...newProvider, base_url: e.target.value })}
-                            placeholder="https://myapp.ngrok.io"
-                        />
-                        <p className="text-xs text-slate-400 mt-1">Required for WebSocket connections. Can be set via BASE_URL env var.</p>
-                    </div>
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">From Number (Optional)</label>
-                        <input
-                            type="text"
-                            className="form-input"
-                            value={newProvider.from_number || ''}
-                            onChange={e => setNewProvider({ ...newProvider, from_number: e.target.value })}
-                            placeholder="+15550000000"
-                        />
-                    </div>
-                    {newProvider.name === 'telnyx' && (
-                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                            <label className="form-label">App ID / Connection ID (Voice)</label>
+                </>
+            )}
+
+            {/* VOICE TAB */}
+            {activeTab === 'voice' && (
+                <div className="card">
+                    <h2 className="card-title">
+                        Voice Configuration
+                    </h2>
+                    <p className="text-slate-400 mb-4 text-sm">Configure containers for Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).</p>
+
+                    <div className="grid-2 mb-4">
+                        <div className="form-group">
+                            <label className="form-label">STT URL (Parakeet)</label>
                             <div className="flex gap-2">
                                 <input
                                     type="text"
                                     className="form-input"
-                                    value={newProvider.app_id || ''}
-                                    onChange={e => setNewProvider({ ...newProvider, app_id: e.target.value })}
-                                    placeholder="1234567890"
+                                    value={voiceConfig.stt_url}
+                                    onChange={e => setVoiceConfig({ ...voiceConfig, stt_url: e.target.value })}
                                 />
                                 <button
-                                    onClick={(e) => { e.preventDefault(); handleCreateApp(); }}
+                                    onClick={checkParakeet}
                                     className="btn btn-secondary"
-                                    title="Create New App on Telnyx"
+                                    style={{ padding: '0 1rem' }}
+                                    title="Test Connection"
                                 >
-                                    <Plus size={18} /> Create App
+                                    <CheckCircle size={18} />
                                 </button>
                             </div>
                         </div>
-                    )}
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">Webhook Secret Token</label>
-                        <div className="flex gap-2">
-                            <input
-                                type="text"
-                                className="form-input"
-                                value={newProvider.webhook_secret || 'Auto-generated on save'}
-                                readOnly
-                                style={{ backgroundColor: '#f1f5f9', color: '#64748b' }}
-                            />
-                            {editingId && (
-                                <button
-                                    onClick={(e) => {
-                                        e.preventDefault();
-                                        if (confirm("Regenerate webhook token? You will need to re-sync with Telnyx.")) {
-                                            // Generate simple UUID-like string
-                                            const newToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-                                            setNewProvider({ ...newProvider, webhook_secret: newToken });
-                                        }
-                                    }}
-                                    className="btn btn-secondary"
-                                    title="Regenerate Token"
-                                >
-                                    <RefreshCw size={18} />
-                                </button>
-                            )}
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1">This token secures inbound webhooks. Use the "Sync" button in the list to update Telnyx.</p>
-                    </div>
-
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="checkbox-label mb-4">
-                            <input
-                                type="checkbox"
-                                checked={newProvider.inbound_enabled !== false}
-                                onChange={e => setNewProvider({ ...newProvider, inbound_enabled: e.target.checked })}
-                            />
-                            Enable Inbound Calls
-                        </label>
-
-                        <h3 className="text-sm font-semibold text-slate-300 mt-4 mb-2">Call Duration Limits</h3>
-                        <div className="grid-2 mb-2">
-                            <div className="form-group">
-                                <label className="form-label">Max Duration (Seconds)</label>
-                                <input
-                                    type="number"
-                                    className="form-input"
-                                    value={newProvider.max_call_duration || ''}
-                                    onChange={e => setNewProvider({ ...newProvider, max_call_duration: parseInt(e.target.value) })}
-                                    placeholder="600"
-                                />
-                                <p className="text-xs text-slate-500 mt-1">Default: 600s (10 minutes)</p>
-                            </div>
-                            <div className="form-group">
-                                <label className="form-label">Limit Message</label>
-                                <input
-                                    type="text"
-                                    className="form-input"
-                                    value={newProvider.call_limit_message || ''}
-                                    onChange={e => setNewProvider({ ...newProvider, call_limit_message: e.target.value })}
-                                    placeholder="This call has reached its time limit. Goodbye."
-                                />
-                                <p className="text-xs text-slate-500 mt-1">TTS message played before hangup.</p>
-                            </div>
-                        </div>
-                        {newProvider.inbound_enabled !== false && (
-                            <>
-                                <label className="form-label">Inbound System Prompt (Optional)</label>
-                                <textarea
-                                    className="form-input"
-                                    value={newProvider.inbound_system_prompt || ''}
-                                    onChange={e => setNewProvider({ ...newProvider, inbound_system_prompt: e.target.value })}
-                                    placeholder="You are a polite receptionist..."
-                                    style={{ minHeight: '80px', resize: 'vertical' }}
-                                />
-                                <p className="text-xs text-slate-400 mt-1">Specific prompt for calls to this number.</p>
-                            </>
-                        )}
-                    </div>
-                </div>
-                <div className="flex gap-2">
-                    <button
-                        onClick={handleSaveProvider}
-                        disabled={loading}
-                        className="btn btn-primary"
-                    >
-                        <Save size={18} />
-                        {editingId ? 'Update Provider' : 'Save Provider'}
-                    </button>
-                    {editingId && (
-                        <button
-                            onClick={handleCancelEdit}
-                            className="btn btn-secondary"
-                        >
-                            Cancel
-                        </button>
-                    )}
-                </div>
-            </div>
-
-            {/* List */}
-            <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
-                <div style={{ padding: '1.5rem', borderBottom: '1px solid var(--border-color)' }}>
-                    <h2 className="card-title" style={{ margin: 0 }}>Configured Providers</h2>
-                </div>
-                <div>
-                    {providers.map(p => (
-                        <div key={p.id} className="flex justify-between items-center" style={{ padding: '1rem 1.5rem', borderBottom: '1px solid rgba(51, 65, 85, 0.3)' }}>
-                            <div className="flex items-center gap-4">
-                                <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: p.enabled ? 'var(--accent-green)' : 'var(--text-secondary)' }} />
-                                <div>
-                                    <div style={{ fontWeight: 500, textTransform: 'capitalize' }}>{p.name}</div>
-                                    <div style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Priority: {p.priority} | From: {p.from_number || 'Default'} {p.app_id ? `| App ID: ${p.app_id} ` : ''}</div>
-                                </div>
-                            </div>
-
-                            <div className="flex items-center gap-2">
-                                {p.name === 'telnyx' && (
-                                    <button
-                                        onClick={() => handleSync(p)}
-                                        className="btn btn-secondary"
-                                        style={{ padding: '0.5rem' }}
-                                        title="Sync Telnyx App Webhooks"
-                                    >
-                                        <RefreshCw size={20} />
-                                    </button>
-                                )}
-                                <button
-                                    onClick={() => handleEdit(p)}
-                                    className="btn btn-secondary"
-                                    style={{ padding: '0.5rem' }}
-                                    title="Edit"
-                                >
-                                    Edit
-                                </button>
-                                <button
-                                    onClick={() => handleToggle(p)}
-                                    className="btn btn-icon"
-                                    title={p.enabled ? "Disable" : "Enable"}
-                                    style={{ color: p.enabled ? 'var(--accent-green)' : 'var(--text-secondary)' }}
-                                >
-                                    {p.enabled ? <CheckCircle size={20} /> : <XCircle size={20} />}
-                                </button>
-                                <button
-                                    onClick={() => p.id && handleDelete(p.id)}
-                                    className="btn btn-icon btn-icon-danger"
-                                    title="Delete"
-                                >
-                                    <Trash2 size={20} />
-                                </button>
-                            </div>
-                        </div>
-                    ))}
-                    {providers.length === 0 && (
-                        <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary)' }}>No providers configured yet.</div>
-                    )}
-                </div>
-            </div>
-
-            {/* Voice Config */}
-            <div className="card">
-                <h2 className="card-title">
-                    Voice Configuration
-                </h2>
-                <p className="text-slate-400 mb-4 text-sm">Configure containers for Speech-to-Text (Parakeet) and Text-to-Speech (Chatterbox).</p>
-
-                <div className="grid-2 mb-4">
-                    <div className="form-group">
-                        <label className="form-label">STT URL (Parakeet)</label>
-                        <div className="flex gap-2">
-                            <input
-                                type="text"
-                                className="form-input"
-                                value={voiceConfig.stt_url}
-                                onChange={e => setVoiceConfig({ ...voiceConfig, stt_url: e.target.value })}
-                            />
-                            <button
-                                onClick={checkParakeet}
-                                className="btn btn-secondary"
-                                style={{ padding: '0 1rem' }}
-                                title="Test Connection"
-                            >
-                                <CheckCircle size={18} />
-                            </button>
-                        </div>
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">TTS URL (Chatterbox)</label>
-                        <input
-                            type="text"
-                            className="form-input"
-                            value={voiceConfig.tts_url}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, tts_url: e.target.value })}
-                        />
-                    </div>
-
-                    <div className="form-group">
-                        <label className="form-label">LLM Provider</label>
-                        <select
-                            className="form-select"
-                            value={llmProvider}
-                            onChange={e => handleProviderChange(e.target.value as any)}
-                        >
-                            <option value="custom">Custom URL</option>
-                            <option value="openai">OpenAI</option>
-                            <option value="ollama">Ollama</option>
-                            <option value="openwebui">Open WebUI</option>
-                        </select>
-                    </div>
-
-                    {llmProvider === 'custom' ? (
                         <div className="form-group">
-                            <label className="form-label">LLM URL</label>
+                            <label className="form-label">TTS URL (Chatterbox)</label>
                             <input
                                 type="text"
                                 className="form-input"
-                                value={voiceConfig.llm_url}
-                                onChange={e => setVoiceConfig({ ...voiceConfig, llm_url: e.target.value })}
-                                placeholder="http://open-webui:8080/v1"
+                                value={voiceConfig.tts_url}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, tts_url: e.target.value })}
                             />
                         </div>
-                    ) : (
-                        <>
-                            {llmProvider !== 'openai' && (
-                                <div className="form-group">
-                                    <label className="form-label">Base URL / Domain</label>
-                                    <input
-                                        type="text"
-                                        className="form-input"
-                                        value={llmBaseDomain}
-                                        onChange={e => handleBaseDomainChange(e.target.value)}
-                                        placeholder={llmProvider === 'ollama' ? "http://localhost:11434" : "http://localhost:3000"}
-                                    />
-                                    <p className="text-xs text-slate-400 mt-1">We will append <code>/v1</code> automatically.</p>
-                                </div>
-                            )}
+
+                        <div className="form-group">
+                            <label className="form-label">LLM Provider</label>
+                            <select
+                                className="form-select"
+                                value={llmProvider}
+                                onChange={e => handleProviderChange(e.target.value as any)}
+                            >
+                                <option value="custom">Custom URL</option>
+                                <option value="openai">OpenAI</option>
+                                <option value="ollama">Ollama</option>
+                                <option value="openwebui">Open WebUI</option>
+                            </select>
+                        </div>
+
+                        {llmProvider === 'custom' ? (
                             <div className="form-group">
-                                <label className="form-label">Generated Endpoint</label>
+                                <label className="form-label">LLM URL</label>
                                 <input
                                     type="text"
                                     className="form-input"
                                     value={voiceConfig.llm_url}
-                                    disabled
-                                    style={{ backgroundColor: '#f1f5f9', color: '#64748b' }}
+                                    onChange={e => setVoiceConfig({ ...voiceConfig, llm_url: e.target.value })}
+                                    placeholder="http://open-webui:8080/v1"
                                 />
                             </div>
-                        </>
-                    )}
+                        ) : (
+                            <>
+                                {llmProvider !== 'openai' && (
+                                    <div className="form-group">
+                                        <label className="form-label">Base URL / Domain</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={llmBaseDomain}
+                                            onChange={e => handleBaseDomainChange(e.target.value)}
+                                            placeholder={llmProvider === 'ollama' ? "http://localhost:11434" : "http://localhost:3000"}
+                                        />
+                                        <p className="text-xs text-slate-400 mt-1">We will append <code>/v1</code> automatically.</p>
+                                    </div>
+                                )}
+                                <div className="form-group">
+                                    <label className="form-label">Generated Endpoint</label>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={voiceConfig.llm_url}
+                                        disabled
+                                        style={{ backgroundColor: '#f1f5f9', color: '#64748b' }}
+                                    />
+                                </div>
+                            </>
+                        )}
 
-                    <div className="form-group">
-                        <label className="form-label">LLM API Key (Optional)</label>
-                        <input
-                            type="password"
-                            className="form-input"
-                            value={voiceConfig.llm_api_key || ''}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, llm_api_key: e.target.value })}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">LLM Model</label>
-                        <div className="flex gap-2">
+                        <div className="form-group">
+                            <label className="form-label">LLM API Key (Optional)</label>
                             <input
-                                type="text"
+                                type="password"
                                 className="form-input"
-                                value={voiceConfig.llm_model}
-                                onChange={e => setVoiceConfig({ ...voiceConfig, llm_model: e.target.value })}
-                                list="model-list"
+                                value={voiceConfig.llm_api_key || ''}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, llm_api_key: e.target.value })}
                             />
-                            <datalist id="model-list">
-                                {availableModels.map(m => (
-                                    <option key={m.id} value={m.id} />
-                                ))}
-                            </datalist>
-
-                            <button
-                                onClick={() => fetchModels(true)}
-                                className="btn btn-secondary"
-                                style={{ padding: '0 1rem' }}
-                                title="Fetch Models"
-                            >
-                                <RefreshCw size={18} />
-                            </button>
                         </div>
-                    </div>
-
-                    <div className="form-group" style={{ gridColumn: '1 / -1' }}>
-                        <label className="form-label">System Prompt (Optional)</label>
-                        <textarea
-                            className="form-input"
-                            value={voiceConfig.system_prompt || ''}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, system_prompt: e.target.value })}
-                            placeholder={envDefaults.system_prompt || "You are a helpful assistant..."}
-                            style={{ minHeight: '100px', resize: 'vertical' }}
-                        />
-                        <div className="flex justify-between items-center mt-2">
-                            <p className="text-xs text-slate-400">
-                                We will automatically append call control instructions (tools) to this prompt.
-                            </p>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <span className="text-sm font-medium text-slate-600">Send Conversation Context</span>
+                        <div className="form-group">
+                            <label className="form-label">LLM Model</label>
+                            <div className="flex gap-2">
                                 <input
-                                    type="checkbox"
-                                    checked={voiceConfig.send_conversation_context !== false}
-                                    onChange={e => setVoiceConfig({ ...voiceConfig, send_conversation_context: e.target.checked })}
-                                    className="scale-125"
+                                    type="text"
+                                    className="form-input"
+                                    value={voiceConfig.llm_model}
+                                    onChange={e => setVoiceConfig({ ...voiceConfig, llm_model: e.target.value })}
+                                    list="model-list"
                                 />
-                            </label>
-                        </div>
-                    </div>
+                                <datalist id="model-list">
+                                    {availableModels.map(m => (
+                                        <option key={m.id} value={m.id} />
+                                    ))}
+                                </datalist>
 
-                    <div className="form-group">
-                        <label className="form-label">Voice ID</label>
-                        <div className="flex gap-2">
+                                <button
+                                    onClick={() => fetchModels(true)}
+                                    className="btn btn-secondary"
+                                    style={{ padding: '0 1rem' }}
+                                    title="Fetch Models"
+                                >
+                                    <RefreshCw size={18} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                            <label className="form-label">System Prompt (Optional)</label>
+                            <textarea
+                                className="form-input"
+                                value={voiceConfig.system_prompt || ''}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, system_prompt: e.target.value })}
+                                placeholder={envDefaults.system_prompt || "You are a helpful assistant..."}
+                                style={{ minHeight: '100px', resize: 'vertical' }}
+                            />
+                            <div className="flex justify-between items-center mt-2">
+                                <p className="text-xs text-slate-400">
+                                    We will automatically append call control instructions (tools) to this prompt.
+                                </p>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <span className="text-sm font-medium text-slate-600">Send Conversation Context</span>
+                                    <input
+                                        type="checkbox"
+                                        checked={voiceConfig.send_conversation_context !== false}
+                                        onChange={e => setVoiceConfig({ ...voiceConfig, send_conversation_context: e.target.checked })}
+                                        className="scale-125"
+                                    />
+                                </label>
+                            </div>
+                        </div>
+
+                        <div className="form-group">
+                            <label className="form-label">Voice ID</label>
+                            <div className="flex gap-2">
+                                <select
+                                    className="form-select"
+                                    value={voiceConfig.voice_id}
+                                    onChange={e => setVoiceConfig({ ...voiceConfig, voice_id: e.target.value })}
+                                >
+                                    <option value="default">Default</option>
+                                    {voiceConfig.voice_id && voiceConfig.voice_id !== 'default' && !availableVoices.find(v => v.name === voiceConfig.voice_id) && (
+                                        <option value={voiceConfig.voice_id}>{voiceConfig.voice_id} (Saved)</option>
+                                    )}
+                                    {availableVoices.map(v => (
+                                        <option key={v.name} value={v.name}>{v.name} ({v.language})</option>
+                                    ))}
+                                </select>
+                                <button
+                                    onClick={() => fetchVoices(true)}
+                                    className="btn btn-secondary"
+                                    style={{ padding: '0 1rem' }}
+                                    title="Fetch Voices"
+                                >
+                                    <RefreshCw size={18} />
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="form-group">
+                            <label className="form-label">RTP Codec</label>
                             <select
                                 className="form-select"
-                                value={voiceConfig.voice_id}
-                                onChange={e => setVoiceConfig({ ...voiceConfig, voice_id: e.target.value })}
+                                value={voiceConfig.rtp_codec || 'PCMU'}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, rtp_codec: e.target.value })}
                             >
-                                <option value="default">Default</option>
-                                {voiceConfig.voice_id && voiceConfig.voice_id !== 'default' && !availableVoices.find(v => v.name === voiceConfig.voice_id) && (
-                                    <option value={voiceConfig.voice_id}>{voiceConfig.voice_id} (Saved)</option>
-                                )}
-                                {availableVoices.map(v => (
-                                    <option key={v.name} value={v.name}>{v.name} ({v.language})</option>
-                                ))}
+                                <option value="PCMU">PCMU (u-law) - Default</option>
+                                <option value="PCMA">PCMA (a-law)</option>
+                                <option value="L16">L16 (8kHz Linear PCM) - High Quality</option>
                             </select>
-                            <button
-                                onClick={() => fetchVoices(true)}
-                                className="btn btn-secondary"
-                                style={{ padding: '0 1rem' }}
-                                title="Fetch Voices"
-                            >
-                                <RefreshCw size={18} />
-                            </button>
+                            <p className="text-xs text-slate-400 mt-1">
+                                Audio encoding. PCMU/PCMA are compressed (8-bit). L16 is uncompressed (16-bit), providing clearer audio.
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={handleSaveVoice}
+                        disabled={voiceLoading}
+                        className="btn btn-primary"
+                    >
+                        <Save size={18} /> Save Voice Configuration
+                    </button>
+                </div>
+            )}
+
+            {/* INTEGRATIONS TAB */}
+            {activeTab === 'integrations' && (
+                <div className="card">
+                    <h2 className="card-title">
+                        Integrations
+                    </h2>
+                    <p className="text-slate-400 mb-4 text-sm">Configure connections to third-party platforms like Open WebUI for advanced routing.</p>
+
+                    <div className="grid-2 mb-4">
+                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                            <label className="form-label flex items-center gap-2">
+                                <Shield size={16} /> Open WebUI Admin Token
+                            </label>
+                            <input
+                                type="password"
+                                className="form-input"
+                                value={voiceConfig.open_webui_admin_token || ''}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, open_webui_admin_token: e.target.value })}
+                                placeholder="sk-..."
+                            />
+                            <p className="text-xs text-slate-400 mt-1">
+                                Required to fetch users and perform admin actions. This token is encrypted in the database.
+                            </p>
                         </div>
                     </div>
 
-                    <div className="form-group">
-                        <label className="form-label">RTP Codec</label>
-                        <select
-                            className="form-select"
-                            value={voiceConfig.rtp_codec || 'PCMU'}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, rtp_codec: e.target.value })}
-                        >
-                            <option value="PCMU">PCMU (u-law) - Default</option>
-                            <option value="PCMA">PCMA (a-law)</option>
-                            <option value="L16">L16 (8kHz Linear PCM) - High Quality</option>
-                        </select>
-                        <p className="text-xs text-slate-400 mt-1">
-                            Audio encoding. PCMU/PCMA are compressed (8-bit). L16 is uncompressed (16-bit), providing clearer audio.
-                        </p>
-                    </div>
-
-                    <div className="form-group">
-                        <label className="form-label">STT Timeout (sec)</label>
-                        <input
-                            type="number"
-                            className="form-input"
-                            value={voiceConfig.stt_timeout || 10}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, stt_timeout: parseInt(e.target.value) || 10 })}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">TTS Timeout (sec)</label>
-                        <input
-                            type="number"
-                            className="form-input"
-                            value={voiceConfig.tts_timeout || 10}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, tts_timeout: parseInt(e.target.value) || 10 })}
-                        />
-                    </div>
-                    <div className="form-group">
-                        <label className="form-label">LLM Timeout (sec)</label>
-                        <input
-                            type="number"
-                            className="form-input"
-                            value={voiceConfig.llm_timeout || 10}
-                            onChange={e => setVoiceConfig({ ...voiceConfig, llm_timeout: parseInt(e.target.value) || 10 })}
-                        />
-                    </div>
-                </div>
-
-                <button
-                    onClick={handleSaveVoice}
-                    disabled={voiceLoading}
-                    className="btn btn-primary"
-                >
-                    <Save size={18} />
-                    Save Voice Config
-                </button>
-            </div>
-
-            {/* System Utilities */}
-            <div className="card">
-                <h2 className="card-title">System Utilities</h2>
-                <div className="flex gap-4">
                     <button
-                        onClick={async () => {
-                            if (!confirm("Create/Update database tables?")) return;
-                            try {
-                                await axios.post('/api/admin/migrate');
-                                alert("Database migrated successfully.");
-                            } catch (e) {
-                                alert("Migration failed.");
-                            }
-                        }}
-                        className="btn btn-secondary"
+                        onClick={handleSaveVoice}
+                        disabled={voiceLoading}
+                        className="btn btn-primary"
                     >
-                        Force Migrate Database
+                        <Save size={18} /> Save Integrations
                     </button>
+
+                    <div className="mt-8 pt-4 border-t border-slate-700">
+                        <h3 className="font-semibold text-slate-300 mb-2">User Directory Test</h3>
+                        <p className="text-sm text-slate-400 mb-2">Check if the token works by fetching users.</p>
+                        <div className="flex gap-2 mb-2">
+                            <button
+                                onClick={fetchOpenWebUIUsers}
+                                disabled={fetchingUsers || !voiceConfig.open_webui_admin_token}
+                                className="btn btn-secondary"
+                            >
+                                {fetchingUsers ? <RefreshCw size={18} className="animate-spin" /> : <Users size={18} />}
+                                Fetch Users
+                            </button>
+                        </div>
+                        {openWebUIUsers.length > 0 && (
+                            <div className="bg-slate-800 p-2 rounded text-sm text-slate-300">
+                                Found {openWebUIUsers.length} users: {openWebUIUsers.map(u => u.name).join(', ')}
+                            </div>
+                        )}
+                    </div>
                 </div>
-            </div>
-        </div >
+            )}
+        </div>
     );
 }
