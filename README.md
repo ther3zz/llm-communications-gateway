@@ -60,9 +60,18 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 - **L16 (Recommended)**: Uncompressed 16-bit 8kHz Linear PCM. Provides significantly clearer audio quality than standard PCMU/A.
 - **PCMU/PCMA**: Standard G.711 codecs for legacy compatibility.
 
-## New Features (v1.1)
+## New Features (v2.2)
+### 🧩 Open WebUI Integration
+- **User Assignment**: Assign specific Open WebUI users to different Providers. Inbound calls to that provider will automatically be logged under that user's ID.
+- **Admin Token**: Configure an Open WebUI Admin Token to fetch and sync users directly from your Open WebUI instance.
+- **Context Awareness**: Call logs invoke the LLM with user-specific context if assigned.
 
-### 📞 Inbound Call Handling
+### � Messaging & Logs
+- **Chat UI for Transcriptions**: View voice call transcriptions in a beautiful, interactive chat-bubble interface.
+- **User Filtering**: SMS and Call logs are now strictly filtered by User ID. Use the dropdown selector to view logs for specific users.
+- **Improved Metadata**: Call logs now capture `Direction`, `From`, `To`, and `Initial Greeting`.
+
+### �📞 Inbound Call Handling
 - **Full Support**: The gateway now fully supports inbound calls (Call-In).
 - **Inbound Prompt**: Configure a specific system prompt for inbound callers (e.g., "You receive a call from a customer...") via the Provider settings.
 - **Zero-Latency Greeting**: Uses `asyncio.Queue` streaming to begin speaking *immediately* when the call connects, even while the rest of the greeting is still generating.
@@ -72,9 +81,8 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 - **Custom Message**: Configure a polite "Time's up" message that plays before the call is automatically terminated.
 - **Configurable**: Set globally via `DEFAULT_MAX_DURATION` env var or per-provider in the Dashboard.
 
-### 📊 Enhanced Logging
-- **Direction**: Call logs now clearly distinguish between `inbound` and `outbound` calls.
-- **Status Tracking**: Improved status updates ensuring failed or incomplete calls are correctly marked in the DB.
+## ⚠️ Important Migration Note
+If upgrading from v1.x, you **must delete your existing `database_v2.db` file** (or drop tables if using Postgres) to let the application regenerate the schema with new columns (`user_id`, `user_label`, `call_control_id`, `open_webui_admin_token`).
 
 ## Performance
 - **Async TTS**: Includes a fully asynchronous, non-blocking TTS streaming engine (via `httpx`) for ultra-low latency response times.
