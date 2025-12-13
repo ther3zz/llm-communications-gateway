@@ -18,14 +18,17 @@ class ProviderConfig(SQLModel, table=True):
     inbound_enabled: bool = Field(default=True) # Whether to accept inbound calls
     max_call_duration: int = Field(default_factory=lambda: int(os.getenv("DEFAULT_MAX_DURATION", 600))) # Max duration in seconds
     call_limit_message: Optional[str] = Field(default="This call has reached its time limit. Goodbye.")
+    assigned_user_id: Optional[str] = Field(default=None, description="Open WebUI User ID to route calls/messages to")
+    assigned_user_label: Optional[str] = Field(default=None, description="Human readable label for the assigned user")
 
 class VoiceConfig(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     stt_url: str = Field(default="http://parakeet:8000")
     tts_url: str = Field(default="http://chatterbox:8000")
-    llm_url: str = Field(default="http://open-webui:8080/v1")
+    llm_url: str = Field(default="http://open-webui:8080/api/v1")
     llm_provider: str = Field(default="custom", description="Preferred LLM provider (openai, ollama, open_webui, custom)")
     llm_api_key: Optional[str] = Field(default=None, description="API Key if needed (e.g. for OpenAI)")
+    open_webui_admin_token: Optional[str] = Field(default=None, description="Admin Token for fetching users from Open WebUI")
     llm_model: str = Field(default="gpt-3.5-turbo")
     voice_id: str = Field(default="default")
     webhook_secret: Optional[str] = Field(default=None, description="Secret token for securing webhooks")
@@ -48,6 +51,7 @@ class MessageLog(SQLModel, table=True):
     cost: Optional[float] = Field(default=0.0)
     message_id: Optional[str] = None # External ID from provider
     user_id: Optional[str] = None
+    user_label: Optional[str] = None # Human readable label (Name/Email)
     chat_id: Optional[str] = None
     media_url: Optional[str] = None # JSON list or single URL
 
@@ -62,6 +66,7 @@ class CallLog(SQLModel, table=True):
     recording_url: Optional[str] = None
     transcription: Optional[str] = None
     user_id: Optional[str] = None
+    user_label: Optional[str] = None # Human readable label (Name/Email)
     chat_id: Optional[str] = None
     call_control_id: Optional[str] = None
     direction: str = Field(default="outbound") # inbound, outbound

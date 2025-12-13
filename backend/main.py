@@ -190,6 +190,28 @@ async def lifespan(app: FastAPI):
              except Exception as e:
                  print(f"Migration failed (rtp_codec): {e}")
 
+        # 10. Open WebUI Integration
+        try:
+             session.exec(text("SELECT open_webui_admin_token FROM voiceconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding open_webui_admin_token to voiceconfig")
+             try:
+                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN open_webui_admin_token VARCHAR"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (open_webui_admin_token): {e}")
+
+        try:
+             session.exec(text("SELECT assigned_user_id FROM providerconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding assigned_user fields to providerconfig")
+             try:
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN assigned_user_id VARCHAR"))
+                 session.exec(text("ALTER TABLE providerconfig ADD COLUMN assigned_user_label VARCHAR"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (assigned_user): {e}")
+
     # --- Seeding ---
     
     # Seed from Env (Telnyx)
@@ -252,7 +274,7 @@ async def lifespan(app: FastAPI):
         # defaults
         stt_url_def = os.getenv("STT_URL", "http://parakeet:8000")
         tts_url_def = os.getenv("TTS_URL", "http://chatterbox:8000")
-        llm_url_def = os.getenv("LLM_URL", "http://open-webui:8080/v1")
+        llm_url_def = os.getenv("LLM_URL", "http://open-webui:8080/api/v1")
         
         if not v_config:
             if debug_mode: print("[DEBUG] Creating default VoiceConfig.")
@@ -333,9 +355,9 @@ async def lifespan(app: FastAPI):
         elif active_provider == "openwebui" and os.getenv("OPEN_WEBUI_URL"):
             final_llm_url = os.getenv("OPEN_WEBUI_URL")
             llm_url_source = "OPEN_WEBUI_URL"
-            # Open WebUI also typically uses /v1
-            if final_llm_url and not final_llm_url.endswith("/v1"):
-                 final_llm_url = f"{final_llm_url.rstrip('/')}/v1"
+            # Open WebUI uses /api/v1
+            if final_llm_url and not final_llm_url.endswith("/api/v1"):
+                 final_llm_url = f"{final_llm_url.rstrip('/')}/api/v1"
         
         elif os.getenv("LLM_URL"):
             # Fallback or Custom
