@@ -165,11 +165,11 @@ async def _process_tts_stream_async(audio_stream, voice_id, codec):
          except Exception as e:
              print(f"Remainder error: {e}")
 
-async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_queue: Optional[Queue] = None) -> list:
+async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_queue: Optional[Queue] = None, call_id: Optional[str] = None) -> tuple:
     """
     Generate audio chunks for the prompt.
     If stream_queue is provided, pushes chunks to it asynchronously.
-    Returns a list of JSON strings (media messages) for backward compatibility / full-buffer usage.
+    Returns (audio_buffer, text).
     """
     print(f"Generating initial audio for prompt: {prompt}")
     audio_buffer = []
@@ -213,7 +213,16 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_qu
         except Exception as e:
             print(f"LLM Exception: {e}")
             
+        except Exception as e:
+            print(f"LLM Exception: {e}")
+            
         if reply:
+            # IMMEDIATE CONTEXT UPDATE (Fix for Missing Greeting)
+            if call_id:
+                if call_id not in CALL_CONTEXT: CALL_CONTEXT[call_id] = {}
+                CALL_CONTEXT[call_id]["initial_greeting"] = reply
+                print(f"[DEBUG] Stored initial greeting for {call_id} immediately after LLM generation.")
+
             # 2. TTS Generation
             try:
                 tts_client = ChatterboxClient(base_url=tts_url)
@@ -237,7 +246,7 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_qu
     if stream_queue:
         await stream_queue.put(None)
         
-    return audio_buffer
+    return audio_buffer, reply if reply else ""
 
 async def preload_inbound_audio(call_control_id: str, prompt: str, voice_config_data: dict):
     """
@@ -248,8 +257,14 @@ async def preload_inbound_audio(call_control_id: str, prompt: str, voice_config_
     PRELOADED_STREAMS[call_control_id] = stream_queue
     
     # Generate will push to queue (streaming)
-    await generate_initial_audio(prompt, voice_config_data, stream_queue=stream_queue)
+    _, text = await generate_initial_audio(prompt, voice_config_data, stream_queue=stream_queue, call_id=call_control_id)
     
+    if text:
+        print(f"[DEBUG] interactive_preload: Storing initial greeting for {call_control_id}: '{text}'")
+        if call_control_id not in CALL_CONTEXT:
+            CALL_CONTEXT[call_control_id] = {}
+        CALL_CONTEXT[call_control_id]["initial_greeting"] = text
+
     print(f"[DEBUG] interactive_preload: Generation task finished for {call_control_id}")
 
 def create_wav_header(pcm_data: bytes, sample_rate: int = 8000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
@@ -490,6 +505,14 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
     start_time = asyncio.get_event_loop().time()
     full_transcription = []
     conversation_history = []  # Maintain conversation state
+    
+    # Check for initial greeting (pre-generated)
+    ctx = CALL_CONTEXT.get(call_id, {})
+    if ctx.get("initial_greeting"):
+        greeting = ctx["initial_greeting"]
+        print(f"[DEBUG] Found initial greeting for {call_id}: {greeting}")
+        full_transcription.append(f"Assistant: {greeting}")
+        conversation_history.append({"role": "assistant", "content": greeting})
 
     # 2. Concurrency Setup
     # We spawn a background task to handle the "Sending" of initial audio (Silence -> Delay -> Preloaded).
@@ -549,6 +572,15 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                  
                  if found_queue and queue:
                      print(f"[DEBUG] [Sender] Streaming from Queue for {call_id}...")
+                     
+                     # LATE BINDING: Check if greeting text is available now (race condition fix)
+                     ctx = CALL_CONTEXT.get(call_id, {})
+                     if ctx.get("initial_greeting") and not any(m['role'] == 'assistant' for m in conversation_history):
+                         greeting = ctx["initial_greeting"]
+                         print(f"[DEBUG] [Sender] Late-binding initial greeting: {greeting}")
+                         full_transcription.append(f"Assistant: {greeting}")
+                         conversation_history.append({"role": "assistant", "content": greeting})
+
                      chunks_sent = 0
                      while True:
                          try:
@@ -870,6 +902,7 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
 
     # inbound_buffer = bytearray() # Moved to top scope
     silence_timer = 0.0 # RMS-based VAD timer
+    has_speech_activity = False
     # BUFFER_THRESHOLD = 64000 # Deprecated in favor of VAD 
     
     # DEBUG_MODE check (module level or local?)
@@ -921,6 +954,7 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                         silence_timer += chunk_duration
                     else:
                         silence_timer = 0.0
+                        has_speech_activity = True
                         
                     # Debug Print periodically
                     # if silence_timer > 0.1:
@@ -943,28 +977,35 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                          reason = "silence_detected"
                          
                     if should_process:
-                        print(f"[DEBUG] Processing Audio ({reason}). Duration: {buffer_duration:.2f}s. Silence: {silence_timer:.2f}s. Last RMS: {rms}")
-                        wav_data = create_wav_header(bytes(inbound_buffer), sample_rate=8000)
-                        try:
-                            transcript = stt_client.transcribe(wav_data, timeout=stt_timeout)
-                            print(f"[DEBUG] STT Raw Output: '{transcript}'") # Always log raw output
-                            if transcript and transcript.strip():
-                                print(f"User: {transcript}")
-                                
-                                # Spawn background task for turn
-                                task = asyncio.create_task(process_conversation_turn(transcript))
-                                turn_tasks.add(task)
-                                task.add_done_callback(turn_tasks.discard)
-                            else:
-                                print("[DEBUG] STT returned empty/silence.")
-
-                                
-                        except Exception as e:
-                            print(f"Pipeline Error: {e}")
-                        
-                        # Reset
-                        inbound_buffer.clear()
-                        silence_timer = 0.0
+                        if not has_speech_activity and reason == "silence_detected":
+                             print(f"[DEBUG] Dropping silent buffer (Duration: {buffer_duration:.2f}s). RMS never exceeded threshold.")
+                             inbound_buffer.clear()
+                             silence_timer = 0.0
+                             has_speech_activity = False
+                        else:
+                            print(f"[DEBUG] Processing Audio ({reason}). Duration: {buffer_duration:.2f}s. Silence: {silence_timer:.2f}s. Last RMS: {rms}")
+                            wav_data = create_wav_header(bytes(inbound_buffer), sample_rate=8000)
+                            try:
+                                transcript = stt_client.transcribe(wav_data, timeout=stt_timeout)
+                                print(f"[DEBUG] STT Raw Output: '{transcript}'") # Always log raw output
+                                if transcript and transcript.strip():
+                                    print(f"User: {transcript}")
+                                    
+                                    # Spawn background task for turn
+                                    task = asyncio.create_task(process_conversation_turn(transcript))
+                                    turn_tasks.add(task)
+                                    task.add_done_callback(turn_tasks.discard)
+                                else:
+                                    print("[DEBUG] STT returned empty/silence.")
+    
+                                    
+                            except Exception as e:
+                                print(f"Pipeline Error: {e}")
+                            
+                            # Reset
+                            inbound_buffer.clear()
+                            silence_timer = 0.0
+                            has_speech_activity = False
             elif event == "stop":
                 print("Media stream stopped")
                 break
@@ -1107,9 +1148,16 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
            "system_prompt": getattr(voice_config, "system_prompt", None),
            "rtp_codec": getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
          }
-         audio_buffer = await generate_initial_audio(request.prompt, vc_data)
+         audio_buffer, init_text = await generate_initial_audio(request.prompt, vc_data)
+         if init_text:
+             # We don't have call_id yet (result comes after make_call), so we can't store in CALL_CONTEXT[call_id] instantly.
+             # We have to wait until we get call_id.
+             # But 'initiate_call' is blocking on this before 'make_call'.
+             # Strategy: Store in a temporary variable and put in CALL_CONTEXT after 'make_call' succeeds.
+             pass
     else:
         audio_buffer = []
+        init_text = None
 
     provider = TelnyxProvider(api_key=decrypt_value(provider_config.api_key))
     from_num = request.from_number or provider_config.from_number or "+15555555555"
@@ -1147,11 +1195,14 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
              print(f"Mapped {short_id} -> {result.get('call_id')} (DB: {call_log.id})")
              
              # Store Context
-             if request.user_id or request.chat_id:
-                 CALL_CONTEXT[result.get('call_id')] = {
-                     "user_id": request.user_id,
-                     "chat_id": request.chat_id
-                 }
+             # Store Context
+             if request.user_id or request.chat_id or init_text:
+                 if result.get('call_id') not in CALL_CONTEXT:
+                      CALL_CONTEXT[result.get('call_id')] = {}
+                 
+                 if request.user_id: CALL_CONTEXT[result.get('call_id')]["user_id"] = request.user_id
+                 if request.chat_id: CALL_CONTEXT[result.get('call_id')]["chat_id"] = request.chat_id
+                 if init_text: CALL_CONTEXT[result.get('call_id')]["initial_greeting"] = init_text
 
 
         if audio_buffer:
@@ -1274,7 +1325,9 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, backg
                 from_number=payload.get("from", "unknown"),
                 status="ringing",
                 call_control_id=call_control_id,
-                direction="inbound"
+                direction="inbound",
+                user_id=provider.assigned_user_id, # Auto-assign from Provider Config
+                user_label=provider.assigned_user_label # Auto-assign label
              )
              session.add(call_log)
              session.commit()
@@ -1288,6 +1341,12 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, backg
                  "max_duration": provider.max_call_duration or 600,
                  "limit_message": provider.call_limit_message or "This call has reached its time limit. Goodbye."
              }
+
+             # Store Context
+             if provider.assigned_user_id:
+                 CALL_CONTEXT[call_control_id] = {
+                     "user_id": provider.assigned_user_id
+                 }
              
              if not resp.get("success"):
                  print(f"[ERROR] Failed to answer inbound call: {resp.get('error')}")

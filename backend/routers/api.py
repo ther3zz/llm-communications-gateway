@@ -51,6 +51,59 @@ def get_parakeet_status(session: Session = Depends(get_session)):
         # Or better, return 503 so frontend sees it as error. Let's return 503 for clarity.
         raise HTTPException(status_code=503, detail=f"Failed to connect to Parakeet: {e}")
 
+@router.get("/integrations/openwebui/users")
+def get_open_webui_users(session: Session = Depends(get_session)):
+    import requests
+    config = session.exec(select(VoiceConfig)).first()
+    if not config or not config.open_webui_admin_token:
+        # If no token, return empty list (or 403, but empty is friendlier for UI probing)
+        return []
+    
+    # Target URL: Use config.llm_url base but need /api/v1/users/
+    # If llm_url defaults to .../api/v1, we can use that base.
+    # User might set custom URL though.
+    # Logic: Extract base from LLM URL or use default.
+    
+    base_url = "http://open-webui:8080"
+    if config.llm_url:
+        # naive parse: remove /api/v1 or /v1
+        base_url = config.llm_url.split("/api/v1")[0].split("/v1")[0].rstrip('/')
+    
+    # Endpoint: /api/v1/users/all
+    target = f"{base_url}/api/v1/users/all"
+    
+    token = decrypt_value(config.open_webui_admin_token)
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        resp = requests.get(target, headers=headers, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # Expecting { "users": [...], "total": 7 } or list
+        # Map to simple structure
+        users = []
+        # Check if data is list or wrapped
+        raw_list = []
+        if isinstance(data, list):
+            raw_list = data
+        elif data.get('users'):
+             raw_list = data['users']
+        elif data.get('data'):
+             raw_list = data['data']
+        
+        for u in raw_list:
+             users.append({
+                 "id": u.get("id"),
+                 "name": u.get("name"),
+                 "email": u.get("email"),
+                 "role": u.get("role")
+             })
+        return users
+    except Exception as e:
+        print(f"Error fetching Open WebUI users: {e}")
+        return []
+
 class SMSSendRequest(BaseModel):
     to_number: str
     message: str
@@ -74,6 +127,8 @@ class ProviderConfigCreate(BaseModel):
     inbound_enabled: bool = True
     max_call_duration: Optional[int] = 600
     call_limit_message: Optional[str] = "This call has reached its time limit. Goodbye."
+    assigned_user_id: Optional[str] = None
+    assigned_user_label: Optional[str] = None
 
 def get_provider_instance(name: str, config: ProviderConfig):
     if name == 'telnyx':
@@ -292,9 +347,17 @@ def get_logs(skip: int = 0, limit: int = 20, session: Session = Depends(get_sess
     return {"logs": logs, "total": total, "skip": skip, "limit": limit}
 
 @router.get("/logs/calls")
-def get_call_logs(skip: int = 0, limit: int = 20, session: Session = Depends(get_session)):
-    logs = session.exec(select(CallLog).order_by(CallLog.timestamp.desc()).offset(skip).limit(limit)).all()
-    total = session.query(CallLog).count()
+def get_call_logs(user_id: str, skip: int = 0, limit: int = 20, session: Session = Depends(get_session)):
+    # Filter by user_id
+    query = select(CallLog).where(CallLog.user_id == user_id).order_by(CallLog.timestamp.desc()).offset(skip).limit(limit)
+    logs = session.exec(query).all()
+    
+    # Count specific to user
+    count_query = select(CallLog).where(CallLog.user_id == user_id)
+    # total = session.exec(select(func.count()).select_from(count_query.subquery())).one() 
+    # simpler count:
+    total = len(session.exec(select(CallLog).where(CallLog.user_id == user_id)).all()) 
+    
     return {"logs": logs, "total": total, "skip": skip, "limit": limit}
 
 @router.get("/config/voice", response_model=VoiceConfig)
@@ -307,6 +370,8 @@ def get_voice_config(session: Session = Depends(get_session)):
     # Decrypt for UI display
     if config.llm_api_key:
         config.llm_api_key = decrypt_value(config.llm_api_key)
+    if config.open_webui_admin_token:
+        config.open_webui_admin_token = decrypt_value(config.open_webui_admin_token)
     return config
 
 
@@ -320,6 +385,8 @@ def save_voice_config(config: VoiceConfig, session: Session = Depends(get_sessio
         existing.llm_provider = config.llm_provider
         if config.llm_api_key:
              existing.llm_api_key = encrypt_value(config.llm_api_key)
+        if config.open_webui_admin_token:
+             existing.open_webui_admin_token = encrypt_value(config.open_webui_admin_token)
         existing.llm_model = config.llm_model
         existing.voice_id = config.voice_id
         existing.stt_timeout = config.stt_timeout
@@ -334,6 +401,8 @@ def save_voice_config(config: VoiceConfig, session: Session = Depends(get_sessio
     else:
         if config.llm_api_key:
             config.llm_api_key = encrypt_value(config.llm_api_key)
+        if config.open_webui_admin_token:
+            config.open_webui_admin_token = encrypt_value(config.open_webui_admin_token)
         session.add(config)
         session.commit()
         session.refresh(config)
