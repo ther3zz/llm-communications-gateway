@@ -273,9 +273,77 @@ class TelnyxProvider(SMSProvider):
                 params["outbound"] = {"outbound_voice_profile_id": profile_id}
             
             resp = self.client.call_control_applications.create(**params)
-            return {"success": True, "app_id": resp.id, "data": resp}
+            
+            resource_id = getattr(resp, 'id', None)
+            if not resource_id and hasattr(resp, 'data'):
+                  resource_id = getattr(resp.data, 'id', None)
+
+            return {"success": True, "app_id": resource_id, "data": resp}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def create_messaging_profile(self, name: str, webhook_url: str) -> Dict:
+        try:
+             # Check if exists? Telnyx allows duplicates, so we just create.
+             payload = {
+                 "name": name,
+                 "webhook_url": webhook_url,
+                 "whitelisted_destinations": ["US", "CA"] # Default to reasonable defaults or empty list if allowed? Documentation says required.
+             }
+             resp = self.client.messaging_profiles.create(**payload)
+             # Telnyx SDK v2 often wraps response in a structure where the resource is in .data
+             # or the object itself acts like the resource but 'id' access might be tricky if it's a validataproperty.
+             # Based on user error 'MessagingProfileCreateResponse object has no attribute id', we should try .data.id
+             # But let's be safe and try getattr or dictionary access if possible, or assume .data.id based on typical pattern.
+             resource_id = getattr(resp, 'id', None)
+             if not resource_id and hasattr(resp, 'data'):
+                 resource_id = getattr(resp.data, 'id', None)
+             
+             return {"success": True, "id": resource_id, "data": resp}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def assign_messaging_profile_to_number(self, phone_number: str, profile_id: str) -> Dict:
+        try:
+            # 1. Search for the number to get its ID
+            # Telnyx API numbers list takes 'filter[phone_number]'
+            # phone_number should be E.164
+            clean_number = phone_number.strip()
+            if not clean_number.startswith('+'):
+                clean_number = '+' + clean_number
+
+            numbers = self.client.phone_numbers.list(filter={'phone_number': clean_number})
+            
+            # Fix: Telnyx ListResponse is not a list, it has a .data property which is the list
+            # We must check if .data exists and has items
+            numbers_list = getattr(numbers, 'data', [])
+            if not numbers_list or len(numbers_list) == 0:
+                 return {"success": False, "error": "Phone number not found in Telnyx account"}
+            
+            number_obj = numbers_list[0]
+            
+            # 2. Update the number with the messaging_profile_id
+            # Use explicit client update method which we confirmed exists via introspection
+            
+            try:
+                # Update directly via the client resource
+                # number_obj is a simple object or dict from the list response .data
+                # We need its ID.
+                resource_id = getattr(number_obj, 'id', None)
+                if not resource_id:
+                     # fallback if it's a dict
+                     resource_id = number_obj.get('id')
+                
+                # Fix: Use the specific messaging sub-resource update method
+                # This aligns with the "updatePhoneNumberWithMessagingSettings" error hint
+                updated_obj = self.client.phone_numbers.messaging.update(resource_id, messaging_profile_id=profile_id)
+                
+                return {"success": True, "data": updated_obj}
+            except Exception as e:
+                print(f"[ERROR] Assignment failed: {e}")
+                return {"success": False, "error": str(e)}
+        except Exception as e:
+             return {"success": False, "error": str(e)}
 
     def start_media_stream(self, call_control_id: str, stream_url: str, stream_track: str = "both_tracks", mode: str = None, codec: str = None) -> Dict:
         try:
