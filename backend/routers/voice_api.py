@@ -18,11 +18,12 @@ import urllib.parse
 import os
 
 from ..database import get_session
-from ..models import ProviderConfig, VoiceConfig, CallLog
+from ..models import ProviderConfig, VoiceConfig, CallLog, UserChannel
 from ..providers.telnyx import TelnyxProvider
 from ..utils.parakeet import ParakeetClient
 from ..utils.chatterbox import ChatterboxClient
 from ..utils.security import decrypt_value
+from ..utils import openwebui
 
 router = APIRouter()
 
@@ -1079,6 +1080,80 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                     db_session.close()
             except Exception as e:
                 print(f"[ERROR] Failed to update CallLog: {e}")
+
+            # --- Inbound Call Alerting ---
+            if call_log and call_log.direction == "inbound" and call_log.user_id:
+                try:
+                    # 1. Get Configs
+                    session_gen = get_session()
+                    db_session = next(session_gen)
+                    voice_conf = db_session.exec(select(VoiceConfig)).first()
+                    
+                    if voice_conf and voice_conf.open_webui_admin_token:
+                        token = decrypt_value(voice_conf.open_webui_admin_token) if voice_conf.open_webui_admin_token else None
+                        # Use LLM URL base if it looks like openwebui, or fallback to a guess?
+                        # Actually we need the 'Base URL' of Open WebUI.
+                        # If llm_url is 'http://open-webui:8080/v1', base is 'http://open-webui:8080'
+                        # But more robustly, we might want a specific setting.
+                        # For now, let's derive it from llm_url if llm_provider is openwebui, OR assume it matches if custom.
+                        # Or checking 'open_webui_url' env default?
+                        # Let's try to derive from llm_url first.
+                        base_url = "http://open-webui:8080" # Default internal docker
+                        if voice_conf.llm_url and "/v1" in voice_conf.llm_url:
+                             possible_base = voice_conf.llm_url.split("/v1")[0].split("/api")[0]
+                             if possible_base: base_url = possible_base
+                        
+                        # 2. Key: (user_id, channel_name)
+                        channel_name = getattr(voice_conf, "alert_channel_name", "LLM-Communications-Gateway Alerts")
+                        
+                        # Check Cache
+                        user_chan = db_session.exec(select(UserChannel).where(
+                            UserChannel.user_id == call_log.user_id,
+                            UserChannel.channel_name == channel_name
+                        )).first()
+                        
+                        target_channel_id = None
+                        if user_chan:
+                            target_channel_id = user_chan.channel_id
+                            # Verify existence? No, trust cache for speed. Fail soft.
+                        else:
+                            # 3. Lookup or Create
+                            print(f"[DEBUG] Alerting: Searching/Creating channel '{channel_name}' for user {call_log.user_id}...")
+                            found_id = openwebui.find_channel_by_user(base_url, token, call_log.user_id, channel_name)
+                            if found_id:
+                                target_channel_id = found_id
+                            else:
+                                created_id = openwebui.create_alert_channel(base_url, token, call_log.user_id, channel_name)
+                                if created_id:
+                                    target_channel_id = created_id
+                            
+                            # Cache it
+                            if target_channel_id:
+                                new_map = UserChannel(user_id=call_log.user_id, channel_name=channel_name, channel_id=target_channel_id)
+                                db_session.add(new_map)
+                                db_session.commit()
+                        
+                        # 4. Send Alert
+                        if target_channel_id:
+                            msg = f"**Inbound Call Alert**\n\n" \
+                                  f"**From:** {call_log.from_number}\n" \
+                                  f"**To:** {call_log.to_number}\n" \
+                                  f"**Duration:** {call_log.duration_seconds}s\n" \
+                                  f"**Status:** {call_log.status}\n\n" \
+                                  f"**Transcription:**\n{call_log.transcription or '(No transcription available)'}"
+                            
+                            success = openwebui.send_alert(base_url, token, target_channel_id, msg)
+                            if success:
+                                print(f"[SUCCESS] Alert sent to OpenWebUI channel {target_channel_id}")
+                            else:
+                                print(f"[WARN] Failed to send alert to channel {target_channel_id}")
+                        else:
+                            print(f"[WARN] Could not find or create alert channel for user {call_log.user_id}")
+                            
+                    db_session.close()
+                except Exception as e:
+                     print(f"[ERROR] Alerting logic failed: {e}")
+
 
 @router.post("/voice/call")
 @router.post("/voice/call")
