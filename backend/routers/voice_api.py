@@ -18,7 +18,7 @@ import urllib.parse
 import os
 
 from ..database import get_session
-from ..models import ProviderConfig, VoiceConfig, CallLog, UserChannel
+from ..models import ProviderConfig, VoiceConfig, CallLog, UserChannel, MessageLog
 from ..providers.telnyx import TelnyxProvider
 from ..utils.parakeet import ParakeetClient
 from ..utils.chatterbox import ChatterboxClient
@@ -46,8 +46,16 @@ class SyncRequest(BaseModel):
 class CreateAppRequest(BaseModel):
     provider: str
     name: str # Name for the new app
-    api_key: str # API key to use (might not be saved yet)
+    api_key: Optional[str] = None # API key to use (might not be saved yet)
+    provider_id: Optional[int] = None # If ID provided, look up key from DB
     base_url: str
+
+class AssignProfileRequest(BaseModel):
+    provider: str
+    phone_number: str
+    messaging_profile_id: str
+    api_key: Optional[str] = None
+    provider_id: Optional[int] = None
 
 # --- Audio Utilities ---
 PRELOADED_STREAMS = {} # call_id -> asyncio.Queue of media chunks (or None for EOF)
@@ -1384,6 +1392,8 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, backg
                  # Use "Introduce yourself" as the trigger for the bot to speak first
                  background_tasks.add_task(preload_inbound_audio, call_control_id, inbound_prompt, vc_data)
 
+
+
              from ..providers.telnyx import TelnyxProvider
              telnyx_provider = TelnyxProvider(api_key=decrypt_value(provider.api_key))
              # Answer WITH Stream Params (RTP + Codec + URL)
@@ -1433,6 +1443,74 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, backg
             
     elif event_type == "call.hangup":
          print(f"Call Hangup: {payload}")
+
+    elif event_type == "message.received":
+        # Handle Inbound SMS/MMS
+        payload_data = request.get("data", {}).get("payload", {})
+        from_number = payload_data.get("from", {}).get("phone_number")
+        to_number = payload_data.get("to", [{}])[0].get("phone_number")
+        text = payload_data.get("text")
+        media = payload_data.get("media")
+        
+        print(f"[DEBUG] Webhook: SMS Received from {from_number} to {to_number}: {text}")
+
+        # 1. Log to DB
+        log = MessageLog(
+            provider_used=provider.name,
+            destination=to_number,
+            content=text or "[Media Received]",
+            status="received",
+            message_id=payload_data.get("id"),
+            user_id=provider.assigned_user_id,
+            user_label=provider.assigned_user_label,
+            media_url=json.dumps(media) if media else None
+        )
+        session.add(log)
+        session.commit()
+        
+        # 2. Send Alert to OpenWebUI
+        try:
+             voice_config = session.exec(select(VoiceConfig)).first()
+             if voice_config and voice_config.open_webui_admin_token and provider.assigned_user_id:
+                 token = decrypt_value(voice_config.open_webui_admin_token)
+                 
+                 # Clean Base URL (remove /api/v1 if present, as utilities append it)
+                 # Default is http://open-webui:8080/api/v1 -> http://open-webui:8080
+                 llm_url = voice_config.llm_url or "http://open-webui:8080"
+                 ow_base = llm_url.replace("/api/v1", "").replace("/v1", "").rstrip("/")
+                 
+                 channel_name = getattr(voice_config, "alert_channel_name", "LLM-Communications-Gateway Alerts")
+                 
+                 # Find or Create Channel
+                 channel_id = openwebui.find_channel_by_user(ow_base, token, provider.assigned_user_id, channel_name)
+                 if not channel_id:
+                     print(f"[DEBUG] Alert channel not found. Creating '{channel_name}'...")
+                     channel_id = openwebui.create_alert_channel(ow_base, token, provider.assigned_user_id, channel_name)
+                 
+                 if channel_id:
+                     # Format Message
+                     alert_msg = f"**📩 New SMS from {from_number}**\n\n{text}"
+                     if media:
+                         for m in media:
+                             url = m.get('url')
+                             content_type = m.get('content_type', '')
+                             if 'image' in content_type:
+                                  alert_msg += f"\n\n![Image]({url})"
+                             elif 'video' in content_type:
+                                  alert_msg += f"\n\n[Video]({url})"
+                             else:
+                                  alert_msg += f"\n\n[Attachment]({url})"
+                                  
+                     openwebui.send_alert(ow_base, token, channel_id, alert_msg)
+                     print(f"[DEBUG] SMS Alert sent to OpenWebUI (Channel: {channel_id})")
+                 else:
+                     print(f"[WARN] Failed to find or create alert channel for user {provider.assigned_user_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to send SMS alert: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return {"status": "received"}
     
     return {"status": "ok"}
 
@@ -1474,6 +1552,74 @@ def sync_provider_app(request: SyncRequest, session: Session = Depends(get_sessi
         
     raise HTTPException(status_code=400, detail="Provider does not support sync")
 
+@router.post("/voice/create-messaging-profile")
+def create_messaging_profile(request: CreateAppRequest, session: Session = Depends(get_session)):
+    """
+    Creates a new Messaging Profile on Telnyx and returns the Profile ID.
+    """
+    if request.provider != 'telnyx':
+        raise HTTPException(status_code=400, detail="Only Telnyx is supported")
+        
+    api_key = request.api_key
+    if not api_key and request.provider_id:
+        # Fetch from DB
+        provider_config = session.get(ProviderConfig, request.provider_id)
+        if provider_config and provider_config.api_key:
+             api_key = decrypt_value(provider_config.api_key)
+    
+    if not api_key:
+         raise HTTPException(status_code=400, detail="API Key is required (or valid Provider ID)")
+
+    # Generate a temporary secret for the webhook URL
+    import uuid
+    temp_secret = uuid.uuid4().hex
+    
+    # Check if we should reuse an existing secret
+    if request.provider_id:
+        provider_config = session.get(ProviderConfig, request.provider_id)
+        if provider_config and provider_config.webhook_secret:
+            temp_secret = provider_config.webhook_secret
+    
+    # Construct initial webhook URL
+    base = request.base_url.rstrip('/')
+    if not base.startswith("http"):
+        base = "https://" + base # Default to HTTPS if missing
+    
+    full_url = f"{base}/api/voice/webhook?token={temp_secret}"
+    
+    provider = TelnyxProvider(api_key=api_key)
+    result = provider.create_messaging_profile(request.name, full_url)
+    
+    if result['success']:
+        return {"id": result['id'], "webhook_secret": temp_secret}
+    else:
+        raise HTTPException(status_code=500, detail=result.get('error'))
+
+@router.post("/voice/assign-messaging-profile")
+def assign_messaging_profile(request: AssignProfileRequest, session: Session = Depends(get_session)):
+    """
+    Assigns a Messaging Profile to a Phone Number on Telnyx.
+    """
+    if request.provider != 'telnyx':
+        raise HTTPException(status_code=400, detail="Only Telnyx is supported")
+        
+    api_key = request.api_key
+    if not api_key and request.provider_id:
+        provider_config = session.get(ProviderConfig, request.provider_id)
+        if provider_config and provider_config.api_key:
+             api_key = decrypt_value(provider_config.api_key)
+    
+    if not api_key:
+         raise HTTPException(status_code=400, detail="API Key is required (or valid Provider ID)")
+
+    provider = TelnyxProvider(api_key=api_key)
+    result = provider.assign_messaging_profile_to_number(request.phone_number, request.messaging_profile_id)
+    
+    if result['success']:
+        return {"status": "assigned"}
+    else:
+        raise HTTPException(status_code=500, detail=result.get('error'))
+
 @router.post("/voice/create-app")
 def create_provider_app(request: CreateAppRequest, session: Session = Depends(get_session)):
     """
@@ -1485,18 +1631,31 @@ def create_provider_app(request: CreateAppRequest, session: Session = Depends(ge
     if request.provider != 'telnyx':
         raise HTTPException(status_code=400, detail="Only Telnyx is supported for app creation")
         
-    if not request.api_key:
-         raise HTTPException(status_code=400, detail="API Key is required")
+    api_key = request.api_key
+    if not api_key and request.provider_id:
+        # Fetch from DB
+        provider_config = session.get(ProviderConfig, request.provider_id)
+        if provider_config and provider_config.api_key:
+             api_key = decrypt_value(provider_config.api_key)
+
+    if not api_key:
+         raise HTTPException(status_code=400, detail="API Key is required (or valid Provider ID)")
 
     # Generate a temporary secret for the webhook URL
     import uuid
     temp_secret = uuid.uuid4().hex
+
+    # Check if we should reuse an existing secret
+    if request.provider_id:
+        provider_config = session.get(ProviderConfig, request.provider_id)
+        if provider_config and provider_config.webhook_secret:
+            temp_secret = provider_config.webhook_secret
     
     # Construct initial webhook URL
     base = request.base_url.rstrip('/')
     full_url = f"{base}/api/voice/webhook?token={temp_secret}"
     
-    provider = TelnyxProvider(api_key=request.api_key)
+    provider = TelnyxProvider(api_key=api_key)
     result = provider.create_app(request.name, full_url)
     
     if not result['success']:

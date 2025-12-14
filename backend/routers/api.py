@@ -128,7 +128,9 @@ class ProviderConfigCreate(BaseModel):
     max_call_duration: Optional[int] = 600
     call_limit_message: Optional[str] = "This call has reached its time limit. Goodbye."
     assigned_user_id: Optional[str] = None
+    assigned_user_id: Optional[str] = None
     assigned_user_label: Optional[str] = None
+    messaging_profile_id: Optional[str] = None
 
 def get_provider_instance(name: str, config: ProviderConfig):
     if name == 'telnyx':
