@@ -210,7 +210,18 @@ async def lifespan(app: FastAPI):
                  session.exec(text("ALTER TABLE providerconfig ADD COLUMN assigned_user_label VARCHAR"))
                  session.commit()
              except Exception as e:
-                 print(f"Migration failed (assigned_user): {e}")
+                print(f"Migration failed (assigned_user): {e}")
+
+        # 11. Inbound Alert Channel Name
+        try:
+             session.exec(text("SELECT alert_channel_name FROM voiceconfig LIMIT 1"))
+        except Exception:
+             print("Migrating: Adding alert_channel_name to voiceconfig")
+             try:
+                 session.exec(text("ALTER TABLE voiceconfig ADD COLUMN alert_channel_name VARCHAR DEFAULT 'LLM-Communications-Gateway Alerts'"))
+                 session.commit()
+             except Exception as e:
+                 print(f"Migration failed (alert_channel_name): {e}")
 
     # --- Seeding ---
     

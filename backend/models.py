@@ -38,6 +38,15 @@ class VoiceConfig(SQLModel, table=True):
     system_prompt: Optional[str] = Field(default=None, description="Custom System Prompt for the Voice Bot")
     send_conversation_context: bool = Field(default=True, description="Whether to send full conversation history to LLM")
     rtp_codec: str = Field(default="PCMU", description="RTP Codec for audio streaming (PCMU, PCMA)")
+    open_webui_admin_token: Optional[str] = Field(default=None, description="Admin Token for fetching users from Open WebUI")
+    alert_channel_name: str = Field(default="LLM-Communications-Gateway Alerts", description="Name of the channel to create for inbound call alerts")
+
+class UserChannel(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True)
+    channel_name: str = Field(index=True)
+    channel_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class MessageLog(SQLModel, table=True):
