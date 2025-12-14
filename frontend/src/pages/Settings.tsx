@@ -47,6 +47,7 @@ interface VoiceConfig {
     send_conversation_context?: boolean;
     rtp_codec?: string;
     open_webui_admin_token?: string;
+    alert_channel_name?: string;
 }
 
 interface EnvDefaults {
@@ -76,7 +77,8 @@ export default function Settings() {
         tts_timeout: 10,
         llm_timeout: 10,
         send_conversation_context: true,
-        rtp_codec: 'PCMU'
+        rtp_codec: 'PCMU',
+        alert_channel_name: 'LLM-Communications-Gateway Alerts'
     });
 
     // Voices state
@@ -945,6 +947,21 @@ export default function Settings() {
                             />
                             <p className="text-xs text-slate-400 mt-1">
                                 Required to fetch users and perform admin actions. This token is encrypted in the database.
+                            </p>
+                        </div>
+                        <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                            <label className="form-label flex items-center gap-2">
+                                <Users size={16} /> Alert Channel Name
+                            </label>
+                            <input
+                                type="text"
+                                className="form-input"
+                                value={voiceConfig.alert_channel_name || ''}
+                                onChange={e => setVoiceConfig({ ...voiceConfig, alert_channel_name: e.target.value })}
+                                placeholder="LLM-Communications-Gateway Alerts"
+                            />
+                            <p className="text-xs text-slate-400 mt-1">
+                                The name of the channel to create/use for inbound call alerts.
                             </p>
                         </div>
                     </div>
