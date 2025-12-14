@@ -65,6 +65,13 @@ A powerful, self-hosted gateway for building Voice AI applications with LLMs. Co
 - **User Assignment**: Assign specific Open WebUI users to different Providers. Inbound calls to that provider will automatically be logged under that user's ID.
 - **Admin Token**: Configure an Open WebUI Admin Token to fetch and sync users directly from your Open WebUI instance.
 - **Context Awareness**: Call logs invoke the LLM with user-specific context if assigned.
+- **Inbound Alerts**: Automatically sends a detailed alert to a private Open WebUI channel when an inbound call is completed.
+
+### 🔔 Inbound Call Alerts
+- **Private Channels**: The system creates a private channel for each user (e.g., "Communications Alerts from LLM Communications Gateway") to ensure privacy.
+- **Rich Notifications**: Alerts include From/To numbers, Call Duration, Call Status, and a full Transcription of the call.
+- **Smart Routing**: Alerts are routed to the specific Open WebUI user assigned to the phone line.
+- **Configurable**: Set the Alert Channel Name in **Settings > Integrations**.
 
 ### � Messaging & Logs
 - **Chat UI for Transcriptions**: View voice call transcriptions in a beautiful, interactive chat-bubble interface.
