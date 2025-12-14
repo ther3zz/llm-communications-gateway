@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Save, Plus, Trash2, CheckCircle, XCircle, RefreshCw, Users, Shield } from 'lucide-react';
+import { Save, Plus, Trash2, CheckCircle, XCircle, RefreshCw, Users, Shield, Link } from 'lucide-react';
 
 interface UtilProvider {
     id?: number;
@@ -12,6 +12,7 @@ interface UtilProvider {
     enabled: boolean;
     priority: number;
     webhook_secret?: string;
+    messaging_profile_id?: string;
     base_url?: string;
     inbound_system_prompt?: string;
     inbound_enabled?: boolean;
@@ -357,18 +358,18 @@ export default function Settings() {
         const appName = prompt("Enter a name for your new Telnyx Application:", "LLM Gateway Voice App");
         if (!appName) return;
 
-        const baseUrl = prompt("Enter the Base URL of your server (e.g. https://myapp.ngrok.io).", window.location.origin);
-        if (!baseUrl) return;
+        const baseUrl = newProvider.base_url;
+        if (!baseUrl) {
+            alert("Please enter a Base URL in the form first.");
+            return;
+        }
 
         // If editing and key is blank (masked), we can't create app easily without sending key again or refetching.
         // For simplicity, mostly support this for NEW providers or requires re-entry.
         let apiKeyToUse = newProvider.api_key;
-        if (!apiKeyToUse && editingId) {
-            // Check if we can proceed? Backend needs key.
-            // Actually, we can't do this securely if we don't have the key.
-            // Prompt user:
-            apiKeyToUse = prompt("Please re-enter your API Key to authorize app creation:") || "";
-            if (!apiKeyToUse) return;
+        if (!apiKeyToUse && !editingId) {
+            alert("Please enter an API Key first.");
+            return;
         }
 
         try {
@@ -376,6 +377,7 @@ export default function Settings() {
                 provider: 'telnyx',
                 name: appName,
                 api_key: apiKeyToUse,
+                provider_id: editingId,
                 base_url: baseUrl
             });
 
@@ -390,6 +392,81 @@ export default function Settings() {
         } catch (e: any) {
             console.error(e);
             alert("Failed to create app: " + (e.response?.data?.detail || e.message));
+        }
+    };
+
+    const handleCreateMessagingProfile = async () => {
+        if (newProvider.name !== 'telnyx') return;
+        if (!newProvider.api_key && !editingId) {
+            alert("Please enter an API Key first.");
+            return;
+        }
+
+        const profileName = prompt("Enter a name for your new Telnyx Messaging Profile:", "LLM Gateway SMS Profile");
+        if (!profileName) return;
+
+        const baseUrl = newProvider.base_url;
+        if (!baseUrl) {
+            alert("Please enter a Base URL in the form first.");
+            return;
+        }
+
+        let apiKeyToUse = newProvider.api_key;
+        if (!apiKeyToUse && !editingId) {
+            alert("Please enter an API Key first.");
+            return;
+        }
+
+        try {
+            const res = await axios.post('/api/voice/create-messaging-profile', {
+                provider: 'telnyx',
+                name: profileName,
+                api_key: apiKeyToUse,
+                provider_id: editingId,
+                base_url: baseUrl
+            });
+
+            if (res.data.id) {
+                setNewProvider({
+                    ...newProvider,
+                    messaging_profile_id: res.data.id,
+                    webhook_secret: res.data.webhook_secret
+                });
+                alert(`Messaging Profile created successfully! ID: ${res.data.id}\n\nA new Webhook Secret has also been generated. Please SAVE the provider to persist these changes.`);
+            }
+        } catch (e: any) {
+            console.error(e);
+            alert("Failed to create messaging profile: " + (e.response?.data?.detail || e.message));
+        }
+    };
+
+    const handleAssignProfile = async () => {
+        if (newProvider.name !== 'telnyx') return;
+        if (!newProvider.messaging_profile_id || !newProvider.from_number) {
+            alert("Please enter both a Messaging Profile ID and a From Number.");
+            return;
+        }
+
+        let apiKeyToUse = newProvider.api_key;
+        if (!apiKeyToUse && !editingId) {
+            alert("Please enter an API Key first.");
+            return;
+        }
+
+        if (!confirm(`Are you sure you want to assign Messaging Profile ${newProvider.messaging_profile_id} to number ${newProvider.from_number}?`)) return;
+
+        try {
+            await axios.post('/api/voice/assign-messaging-profile', {
+                provider: 'telnyx',
+                phone_number: newProvider.from_number,
+                messaging_profile_id: newProvider.messaging_profile_id,
+                api_key: apiKeyToUse,
+                provider_id: editingId
+            });
+            alert("Messaging Profile assigned successfully!");
+        } catch (e: any) {
+            console.error(e);
+            alert("Failed to assign profile: " + (e.response?.data?.detail || e.message));
         }
     };
 
@@ -516,6 +593,35 @@ export default function Settings() {
                                             title="Create New App on Telnyx"
                                         >
                                             <Plus size={18} /> Create App
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            {newProvider.name === 'telnyx' && (
+                                <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                                    <label className="form-label">Messaging Profile ID (SMS)</label>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={newProvider.messaging_profile_id || ''}
+                                            onChange={e => setNewProvider({ ...newProvider, messaging_profile_id: e.target.value })}
+                                            placeholder="4001..."
+                                        />
+                                        <button
+                                            onClick={(e) => { e.preventDefault(); handleCreateMessagingProfile(); }}
+                                            className="btn btn-secondary"
+                                            title="Create New Messaging Profile on Telnyx"
+                                        >
+                                            <Plus size={18} /> Create Profile
+                                        </button>
+                                        <button
+                                            onClick={(e) => { e.preventDefault(); handleAssignProfile(); }}
+                                            className="btn btn-secondary"
+                                            title="Assign this Profile to the From Number"
+                                        >
+                                            <Link size={18} /> Assign to Number
                                         </button>
                                     </div>
                                 </div>
