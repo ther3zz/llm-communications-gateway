@@ -10,6 +10,7 @@ class ProviderConfig(SQLModel, table=True):
     api_url: Optional[str] = None
     from_number: Optional[str] = None # Default sender number
     app_id: Optional[str] = None # e.g. Telnyx Call Control App ID
+    messaging_profile_id: Optional[str] = None # e.g. Telnyx Messaging Profile ID
     enabled: bool = Field(default=False)
     priority: int = Field(default=0) # 0 = highest priority
     webhook_secret: Optional[str] = Field(default=None, description="Secret token for securing webhooks specific to this provider")
