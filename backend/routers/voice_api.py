@@ -27,6 +27,22 @@ from ..utils import openwebui
 
 router = APIRouter()
 
+PARALINGUISTIC_INSTRUCTIONS = """
+The TTS system supports Paralinguistic Tags. You can enhance realism by adding any of the following tags directly in the text:
+[clear throat]
+[sigh]
+[sush]
+[cough]
+[groan]
+[sniff]
+[gasp]
+[chuckle]
+[laugh]
+
+Tips to good generation:
+Paralinguistic tags work best when they're used in context. For example, if you include a [gasp] tag, surrounding it with text that conveys surprise or shock will produce more natural and expressive results.
+"""
+
 class CallRequest(BaseModel):
     to_number: str
     provider: str # Required now
@@ -199,6 +215,8 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_qu
              final_system_message = f"{system_prompt}\n\nCurrent Call Goal: {prompt}"
         else:
              final_system_message = prompt
+        
+        final_system_message += f"\n\n{PARALINGUISTIC_INSTRUCTIONS}"
              
         chat_payload = {
             "model": llm_model,
@@ -213,7 +231,14 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_qu
         
         reply = None
         try:
-            llm_resp = requests.post(f"{llm_url.rstrip('/')}/chat/completions", json=chat_payload, headers=headers, timeout=llm_timeout)
+            import time
+            start_ts = time.time()
+            async with httpx.AsyncClient(timeout=llm_timeout) as client:
+                llm_resp = await client.post(f"{llm_url.rstrip('/')}/chat/completions", json=chat_payload, headers=headers)
+            
+            latency = time.time() - start_ts
+            print(f"[DEBUG] LLM Latency (Initial): {latency:.2f}s")
+            
             if llm_resp.status_code == 200:
                 reply = llm_resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 print(f"Agent Reply: {reply}")
@@ -239,6 +264,8 @@ async def generate_initial_audio(prompt: str, voice_config_data: dict, stream_qu
                 codec = voice_config_data.get("rtp_codec", "PCMU")
                 
                 async for msg_json in process_tts_stream(tts_stream, voice_id, codec=codec):
+                    if len(audio_buffer) == 0:
+                        print(f"[DEBUG] [Producer] First audio chunk generated and pushed to queue!")
                     audio_buffer.append(msg_json)
                     if stream_queue:
                         await stream_queue.put(msg_json)
@@ -586,9 +613,10 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                      ctx = CALL_CONTEXT.get(call_id, {})
                      if ctx.get("initial_greeting") and not any(m['role'] == 'assistant' for m in conversation_history):
                          greeting = ctx["initial_greeting"]
-                         print(f"[DEBUG] [Sender] Late-binding initial greeting: {greeting}")
-                         full_transcription.append(f"Assistant: {greeting}")
-                         conversation_history.append({"role": "assistant", "content": greeting})
+                         greeting = ctx["initial_greeting"];
+                         print(f"[DEBUG] [Sender] Late-binding initial greeting: {greeting}");
+                         full_transcription.append(f"Assistant: {greeting}");
+                         conversation_history.append({"role": "assistant", "content": greeting});
 
                      chunks_sent = 0
                      while True:
@@ -598,6 +626,9 @@ async def websocket_endpoint(websocket: WebSocket, short_id: str, token: Optiona
                                  queue.task_done()
                                  break
                              
+                             if chunks_sent == 0:
+                                  print(f"[DEBUG] [Sender] First audio chunk retrieved from queue. Streaming started!")
+
                              try:
                                  chunk_obj = json.loads(chunk)
                                  if stream_id and "stream_id" not in chunk_obj:
@@ -690,7 +721,7 @@ Format:
 ```
 IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON block aloud.
 """
-    final_system_prompt = base_prompt + "\n" + TOOL_INSTRUCTIONS
+    final_system_prompt = base_prompt + "\n" + TOOL_INSTRUCTIONS + "\n" + PARALINGUISTIC_INSTRUCTIONS
 
     async def process_conversation_turn(transcript):
          nonlocal is_bot_speaking
@@ -723,6 +754,8 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
              headers = {"Authorization": f"Bearer {llm_api_key}"} if llm_api_key else {}
              
              try:
+                 import time
+                 start_ts = time.time()
                  llm_resp = requests.post(
                      f"{llm_url.rstrip('/')}/chat/completions",
                      json=chat_payload,
@@ -730,6 +763,8 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
                      timeout=llm_timeout,
                      stream=True, 
                  )
+                 latency = time.time() - start_ts
+                 print(f"[DEBUG] LLM Latency (Stream Start): {latency:.2f}s")
                  
                  if llm_resp.status_code == 200:
                      print("LLM Stream Started... Buffering for tool check...")
@@ -1164,7 +1199,6 @@ IMPORTANT: Do NOT output any text after the JSON block. Do NOT read the JSON blo
 
 
 @router.post("/voice/call")
-@router.post("/voice/call")
 async def initiate_call(request: CallRequest, fastapi_req: Request, background_tasks: BackgroundTasks, session: Session = Depends(get_session)):
     provider_config = session.exec(select(ProviderConfig).where(ProviderConfig.name == request.provider, ProviderConfig.enabled == True)).first()
     print(f"[DEBUG] Initiate Call Request: {request.json()}")
@@ -1217,7 +1251,11 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
              stream_url += f"&delay_ms={request.delay_ms}"
          print(f"Initiating Call with Stream: {stream_url} (Track: both_tracks)")
     
-    # Pre-generate Audio (Blocking) to ensure no dead air
+    # Pre-generate Audio (Background) to ensure no dead air
+    # We no longer block here. We create a Queue and pass it to a background task.
+    stream_queue = None
+    vc_data = {}
+    
     if request.prompt:
          voice_config = session.exec(select(VoiceConfig)).first()
          vc_data = {
@@ -1231,22 +1269,14 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
            "system_prompt": getattr(voice_config, "system_prompt", None),
            "rtp_codec": getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
          }
-         audio_buffer, init_text = await generate_initial_audio(request.prompt, vc_data)
-         if init_text:
-             # We don't have call_id yet (result comes after make_call), so we can't store in CALL_CONTEXT[call_id] instantly.
-             # We have to wait until we get call_id.
-             # But 'initiate_call' is blocking on this before 'make_call'.
-             # Strategy: Store in a temporary variable and put in CALL_CONTEXT after 'make_call' succeeds.
-             pass
-    else:
-        audio_buffer = []
-        init_text = None
+         # Create Queue immediately
+         stream_queue = Queue()
 
     provider = TelnyxProvider(api_key=decrypt_value(provider_config.api_key))
     from_num = request.from_number or provider_config.from_number or "+15555555555"
 
     # Pass stream_url to make_call
-    rtp_codec = getattr(voice_config, "rtp_codec", "PCMU") or "PCMU"
+    rtp_codec = getattr(voice_config, "rtp_codec", "PCMU") or "PCMU" if request.prompt else "PCMU"
     result = provider.make_call(request.to_number, from_num, connection_id, stream_url=stream_url, codec=rtp_codec)
     
     call_log = CallLog(
@@ -1267,38 +1297,36 @@ async def initiate_call(request: CallRequest, fastapi_req: Request, background_t
        
     # Store mappings
     if result.get('call_id'):
+        call_id = result.get('call_id')
         if short_id:
              STREAM_ID_MAP[short_id] = {
-                 "call_id": result.get('call_id'),
+                 "call_id": call_id,
                  "db_id": call_log.id,
                  "prompt": request.prompt,
                  "max_duration": provider_config.max_call_duration or 600,
                  "limit_message": provider_config.call_limit_message or "This call has reached its time limit. Goodbye."
              }
-             print(f"Mapped {short_id} -> {result.get('call_id')} (DB: {call_log.id})")
+             print(f"Mapped {short_id} -> {call_id} (DB: {call_log.id})")
              
              # Store Context
-             # Store Context
-             if request.user_id or request.chat_id or init_text:
-                 if result.get('call_id') not in CALL_CONTEXT:
-                      CALL_CONTEXT[result.get('call_id')] = {}
+             if request.user_id or request.chat_id:
+                 if call_id not in CALL_CONTEXT:
+                      CALL_CONTEXT[call_id] = {}
                  
-                 if request.user_id: CALL_CONTEXT[result.get('call_id')]["user_id"] = request.user_id
-                 if request.chat_id: CALL_CONTEXT[result.get('call_id')]["chat_id"] = request.chat_id
-                 if init_text: CALL_CONTEXT[result.get('call_id')]["initial_greeting"] = init_text
+                 if request.user_id: CALL_CONTEXT[call_id]["user_id"] = request.user_id
+                 if request.chat_id: CALL_CONTEXT[call_id]["chat_id"] = request.chat_id
 
-
-        if audio_buffer:
-            # Create a queue and pre-fill it for consistency with streaming logic
-            # Since audio_buffer is already fully generated here (initiate_call is blocking on it)
-            # We can just put them all in.
-            q = Queue()
-            for chunk in audio_buffer:
-                q.put_nowait(chunk)
-            q.put_nowait(None) # EOF
+        if stream_queue:
+            # Register Queue for consumption
+            PRELOADED_STREAMS[call_id] = stream_queue
+            print(f"Registered PRELOADED_STREAMS queue for {call_id}")
             
-            PRELOADED_STREAMS[result.get('call_id')] = q
-            print(f"Stored {len(audio_buffer)} preloaded chunks in Queue for {result.get('call_id')}")
+            # Start Background Generation
+            # We must wrap it to ensure it runs
+            async def background_gen(p, v, q, c):
+                await generate_initial_audio(p, v, q, c)
+            
+            background_tasks.add_task(background_gen, request.prompt, vc_data, stream_queue, call_id)
 
     return {"status": "initiated", "call_id": result.get('call_id'), "db_id": call_log.id}
 
