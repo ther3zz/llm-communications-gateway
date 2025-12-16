@@ -1,4 +1,5 @@
 import requests
+import httpx
 import json
 from typing import Optional
 
@@ -97,3 +98,40 @@ def send_alert(base_url: str, token: str, channel_id: str, message: str) -> bool
         print(f"[ERROR] OpenWebUI: Error sending alert: {e}")
         
     return False
+
+async def get_user_details(base_url: str, token: str, user_id: str) -> Optional[dict]:
+    """
+    Fetch user details by ID from Open WebUI asynchronously.
+    Returns dictionary with 'name', 'email', 'role' if found.
+    """
+    try:
+        url = f"{base_url.rstrip('/')}/api/v1/users/all"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(url, headers=headers)
+            
+        if resp.status_code == 200:
+            data = resp.json()
+            users = []
+            if isinstance(data, list): users = data
+            elif data.get('users'): users = data['users']
+            elif data.get('data'): users = data['data']
+            
+            for u in users:
+                if u.get('id') == user_id:
+                     return {
+                         "name": u.get("name"),
+                         "email": u.get("email"),
+                         "role": u.get("role")
+                     }
+        else:
+             print(f"[WARN] OpenWebUI: Failed to fetch users ({resp.status_code})")
+
+    except Exception as e:
+        print(f"[ERROR] OpenWebUI: User fetch error: {e}")
+    
+    return None
