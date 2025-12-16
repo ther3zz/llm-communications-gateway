@@ -1471,6 +1471,30 @@ async def webhook_handler(request: dict, token: str, raw_request: Request, backg
             
     elif event_type == "call.hangup":
          print(f"Call Hangup: {payload}")
+         
+         # Resolve User Label if missing (Outbound calls usually have user_id but no label initially)
+         try:
+             # Find Call Log
+             call_log = session.exec(select(CallLog).where(CallLog.call_control_id == call_control_id)).first()
+             
+             if call_log and call_log.user_id and not call_log.user_label:
+                 voice_conf = session.exec(select(VoiceConfig)).first()
+                 if voice_conf and voice_conf.open_webui_admin_token:
+                     token = decrypt_value(voice_conf.open_webui_admin_token)
+                     
+                     # Derive Base URL
+                     base_url = "http://open-webui:8080"
+                     if voice_conf.llm_url:
+                         base_url = voice_conf.llm_url.split("/v1")[0].split("/api")[0].rstrip('/')
+                         
+                     user_details = await openwebui.get_user_details(base_url, token, call_log.user_id)
+                     if user_details and user_details.get("name"):
+                         call_log.user_label = user_details.get("name")
+                         session.add(call_log)
+                         session.commit()
+                         print(f"[SUCCESS] Resolved User Label for Outbound Call: {call_log.user_label}")
+         except Exception as e:
+             print(f"[WARN] Failed to resolve user label: {e}")
 
     elif event_type == "message.received":
         # Handle Inbound SMS/MMS
